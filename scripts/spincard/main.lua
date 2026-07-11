@@ -39,7 +39,9 @@ local opts = {
     show_tech     = true,  -- local file details (codec/HDR/audio/subs/chapters/…)
     show_fanart    = true, -- dimmed fanart.jpg backdrop (needs ffmpeg)
     fanart_opacity = 0.4,  -- backdrop opacity 0..1 (higher = more visible/darker)
-    fanart_timeout = 3,    -- auto-hide the fanart this many seconds after it appears (0 = keep)
+    fanart_timeout = 3,    -- fanart lifetime: hide it this many seconds after it appears (0 = keep)
+    fanart_fade    = true, -- fade the fanart in (0.1→fanart_opacity) then out (→0) over fanart_timeout
+    fanart_fade_frames = 16, -- fade smoothness: pre-rendered opacity steps (more = smoother/heavier)
     show_banner    = false, -- wide banner.jpg top-left (opaque JPEG, no alpha)
     banner_height  = 0.10,  -- banner height as a fraction of the video height
     show_logo      = true,  -- clearlogo.png title art, top-left (transparent PNG)
@@ -276,8 +278,11 @@ local fanart = {
     file = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-fanart-"
         .. (mp.get_property("pid") or "x") .. ".bgra",
     w = 0, h = 0, ready = false, shown = false, src = nil,
+    frames = 1, framebytes = 0, fade_idx = 0, -- packed opacity frames (fade mode)
 }
-local FANART_H = 720
+local FANART_H = 720        -- decode height for the static (non-fade) backdrop
+local FANART_FADE_H = 360   -- decode height per fade frame (kept small: N frames packed)
+local FANART_FADE_MIN = 0.1 -- fade-in floor opacity (rises from here to fanart_opacity)
 
 local function find_fanart(path, id)
     local dir = path:match("^(.*)/[^/]+$") or "."
@@ -298,34 +303,62 @@ local function find_fanart(path, id)
     return nil
 end
 
+-- Decode the fanart to premultiplied BGRA: either one dimmed frame
+-- (fanart_opacity), or — when fading — a packed strip of fanart_fade_frames
+-- whose opacity rises FANART_FADE_MIN→fanart_opacity then falls →0. The fade is
+-- one ffmpeg pass: the loop filter replicates the still, and a frame-indexed geq
+-- envelope scales all four premultiplied channels; frames are stepped later by
+-- overlay byte offset (like the disc).
 local function fanart_decode(srcpath, cb)
-    local op = string.format("%.3f", math.max(0, math.min(1, opts.fanart_opacity)))
-    -- Premultiplied dim: scale RGB and alpha by the opacity factor.
-    local vf = string.format(
-        "scale=-2:%d,format=rgba,colorchannelmixer=rr=%s:gg=%s:bb=%s:aa=%s",
-        FANART_H, op, op, op, op)
-    mp.command_native_async({
-        name = "subprocess", playback_only = false,
+    local fade = opts.fanart_fade and (tonumber(opts.fanart_timeout) or 0) > 0
+    local dech = fade and FANART_FADE_H or FANART_H
+    local nf = fade and math.max(2, math.floor(tonumber(opts.fanart_fade_frames) or 16)) or 1
+    local args
+    if fade then
+        local peak = math.max(0, math.min(1, opts.fanart_opacity))
+        local lo = math.min(FANART_FADE_MIN, peak)
+        local d = nf - 1
+        local frac = "N/" .. d
+        local env = string.format(
+            "if(lte(%s\\,0.5)\\,%.4f+(%.4f-%.4f)*2*(%s)\\,%.4f*(2-2*(%s)))",
+            frac, lo, peak, lo, frac, peak, frac)
+        local vf = string.format(
+            "scale=-2:%d,format=rgba,loop=loop=%d:size=1:start=0,"
+                .. "geq=r=r(X\\,Y)*%s:g=g(X\\,Y)*%s:b=b(X\\,Y)*%s:a=alpha(X\\,Y)*%s",
+            dech, d, env, env, env, env)
         args = { "ffmpeg", "-y", "-loglevel", "error", "-i", srcpath,
-            "-vf", vf, "-pix_fmt", "bgra", "-f", "rawvideo", fanart.file },
-    }, function(ok, res)
+            "-vf", vf, "-frames:v", tostring(nf), "-pix_fmt", "bgra", "-f", "rawvideo", fanart.file }
+    else
+        local op = string.format("%.3f", math.max(0, math.min(1, opts.fanart_opacity)))
+        -- Premultiplied dim: scale RGB and alpha by the opacity factor.
+        local vf = string.format(
+            "scale=-2:%d,format=rgba,colorchannelmixer=rr=%s:gg=%s:bb=%s:aa=%s",
+            dech, op, op, op, op)
+        args = { "ffmpeg", "-y", "-loglevel", "error", "-i", srcpath,
+            "-vf", vf, "-pix_fmt", "bgra", "-f", "rawvideo", fanart.file }
+    end
+    mp.command_native_async({ name = "subprocess", playback_only = false, args = args },
+        function(ok, res)
         if not ok or not res or res.status ~= 0 then
             msg.warn("fanart decode failed"); return cb(false)
         end
         local fi = utils.file_info(fanart.file)
         if not fi or not fi.size or fi.size == 0 then return cb(false) end
-        fanart.h = FANART_H
-        fanart.w = math.floor(fi.size / (4 * FANART_H))
+        fanart.h = dech
+        fanart.frames = nf
+        fanart.framebytes = math.floor(fi.size / nf)
+        fanart.w = math.floor(fanart.framebytes / (4 * dech))
+        fanart.fade_idx = 0
         fanart.ready, fanart.src = true, srcpath
-        msg.verbose(string.format("fanart %dx%d ready", fanart.w, fanart.h))
+        msg.verbose(string.format("fanart %dx%d x%d frames ready", fanart.w, fanart.h, fanart.frames))
         cb(true)
     end)
 end
 
--- fanart auto-dismiss: hide just the backdrop a few seconds after it first
--- appears (opts.fanart_timeout; 0 = keep it for the card's life). `dismissed`
--- stops the osd-width re-show from reviving it once the timeout has fired; it is
--- reset by show() each time the card is (re)displayed.
+-- fanart lifetime. In fade mode the packed frames are stepped 0..N-1 across
+-- opts.fanart_timeout then removed; otherwise the static backdrop is hard-hidden
+-- after the timeout. `dismissed` stops the osd-width re-show from reviving it
+-- once done; it (and fade_idx) reset in show() on each (re)display.
 local fanart_timer = nil
 local fanart_dismissed = false
 
@@ -337,19 +370,36 @@ local function fanart_hide()
     end
 end
 
+-- Draw the current fanart frame (fade_idx picks the packed frame; 0 when static).
+local function fanart_draw()
+    local ow, oh = mp.get_osd_size()
+    if not ow or ow == 0 or not oh or oh == 0 then return false end
+    mp.command_native({ name = "overlay-add", id = fanart.id, x = 0, y = 0,
+        file = fanart.file, offset = (fanart.fade_idx or 0) * (fanart.framebytes or 0),
+        fmt = "bgra", w = fanart.w, h = fanart.h, stride = fanart.w * 4, dw = ow, dh = oh })
+    fanart.shown = true
+    return true
+end
+
 local function fanart_show()
     if not opts.show_fanart or not fanart.ready or fanart_dismissed then return end
-    local ow, oh = mp.get_osd_size()
-    if not ow or ow == 0 or not oh or oh == 0 then return end
-    mp.command_native({
-        name = "overlay-add", id = fanart.id, x = 0, y = 0,
-        file = fanart.file, offset = 0, fmt = "bgra",
-        w = fanart.w, h = fanart.h, stride = fanart.w * 4, dw = ow, dh = oh,
-    })
-    fanart.shown = true
-    -- arm the one-shot auto-dismiss the first time the backdrop is actually
-    -- drawn (guard on fanart_timer so osd-width re-shows don't restart it).
-    if opts.fanart_timeout and opts.fanart_timeout > 0 and not fanart_timer then
+    if not fanart_draw() then return end -- OSD size not known yet; retried via osd-width
+    if fanart_timer then return end      -- already animating (e.g. an osd-width re-show)
+    local nf = fanart.frames or 1
+    if nf > 1 then
+        -- fade: advance one frame per tick, remove the backdrop after the last
+        local step = (tonumber(opts.fanart_timeout) or 3) / (nf - 1)
+        fanart_timer = mp.add_periodic_timer(step, function()
+            fanart.fade_idx = (fanart.fade_idx or 0) + 1
+            if fanart.fade_idx >= nf then
+                fanart_dismissed = true
+                fanart_hide() -- kills this timer + removes the overlay
+            else
+                fanart_draw()
+            end
+        end)
+    elseif (tonumber(opts.fanart_timeout) or 0) > 0 then
+        -- static backdrop: hard-hide once the timeout elapses
         fanart_timer = mp.add_timeout(opts.fanart_timeout, function()
             fanart_dismissed = true
             fanart_hide()
@@ -1053,7 +1103,7 @@ show = function(timeout)
     visible = true
     if live_ctx then live_refresh() end -- re-read the EPG each time the card appears
     render()
-    fanart_dismissed = false -- each (re)display restarts the fanart's timed window
+    fanart_dismissed, fanart.fade_idx = false, 0 -- restart the fanart's timed window / fade
     fanart_show()
     poster_show()
     banner_show()
