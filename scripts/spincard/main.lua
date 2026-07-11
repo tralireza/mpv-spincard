@@ -32,6 +32,7 @@ local opts = {
     api_key   = "",        -- TMDB API key; empty => filename-only card
     language  = "en-US",   -- TMDB response language
     tvheadend_url = "",    -- e.g. http://127.0.0.1:9981 — live-TV EPG source ("" = off)
+    live_upcoming = 3,     -- live TV: how many upcoming programmes to list under "Up next" (0 = none)
     show_poster   = true,  -- render the local poster image (needs ffmpeg)
     poster_height = 0.42,  -- poster height as a fraction of the video height
     poster_margin = 0.02,  -- gap from the top-right corner (fraction of height; 0 = flush)
@@ -688,15 +689,23 @@ local function tvh_resolve(path, chan_name, cb)
     end)
 end
 
--- Resolve the channel -> its current programme card (or nil).
+-- Resolve the channel -> its current programme card (or nil). entries[1] is the
+-- programme on now; entries[2..] are what follows, kept as an `upcoming` list.
 local function tvh_fetch(path, chan_name, cb)
     tvh_resolve(path, chan_name, function(uuid)
         if not uuid then return cb(nil) end
-        curl_json(string.format("%s/api/epg/events/grid?channel=%s&limit=2",
-            opts.tvheadend_url, urlencode(uuid)), function(e)
+        local want = math.max(0, math.floor(tonumber(opts.live_upcoming) or 0))
+        curl_json(string.format("%s/api/epg/events/grid?channel=%s&limit=%d",
+            opts.tvheadend_url, urlencode(uuid), want + 1), function(e)
             local ev = e and e.entries and e.entries[1]
             if not ev then return cb(nil) end
-            local nxt = e.entries[2]
+            local upcoming = {}
+            for i = 2, math.min(#e.entries, want + 1) do
+                local nx = e.entries[i]
+                if nx and nx.title and nx.title ~= "" then
+                    upcoming[#upcoming + 1] = { title = nx.title, start = tonumber(nx.start) }
+                end
+            end
             cb({
                 kind = "livetv", source = "TVheadend",
                 channel = ev.channelName or chan_name,
@@ -704,8 +713,7 @@ local function tvh_fetch(path, chan_name, cb)
                 subtitle = (ev.subtitle and ev.subtitle ~= "") and ev.subtitle or ev.episodeOnscreen,
                 overview = ev.summary or ev.description,
                 start = tonumber(ev.start), stop = tonumber(ev.stop),
-                next_title = nxt and nxt.title,
-                next_start = nxt and tonumber(nxt.start),
+                upcoming = upcoming,
             })
         end)
     end)
@@ -815,11 +823,20 @@ local function build_card(c)
                 os.date("%H:%M", c.start), os.date("%H:%M", c.stop), os.date("%H:%M", c.stop)),
                 18, "A0A0A0")
         end
-        if c.next_title and c.next_title ~= "" then
-            cy = cy + 4
-            local up = "Up next: " .. c.next_title
-            if c.next_start then up = up .. "  (" .. os.date("%H:%M", c.next_start) .. ")" end
-            line(up, 18, "8C8C8C")
+        if c.upcoming and #c.upcoming > 0 then
+            cy = cy + 6
+            line("Up next", 18, "00D7FF", true)
+            -- Fit each row to the card's inner width rather than a fixed char
+            -- count. The OSD sans font averages ~0.5*fs px per glyph (matches
+            -- the overview wrap's 74 chars @ fs22); mpv exposes no text-measure
+            -- API, so this is an estimate and wrap() still ellipsizes overruns.
+            local fs = 18
+            local budget = math.floor(innerw / (fs * 0.5))
+            for _, up in ipairs(c.upcoming) do
+                local pfx = up.start and (os.date("%H:%M", up.start) .. "   ") or ""
+                local title = wrap(up.title, math.max(8, budget - #pfx), 1)[1] or up.title
+                line(pfx .. title, fs, "8C8C8C")
+            end
         end
     else
     -- heading: text title, OR a reserved slot the clearlogo bitmap fills in
