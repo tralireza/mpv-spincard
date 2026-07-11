@@ -21,7 +21,10 @@ local NOISE = {
     "proper", "repack", "extended", "unrated", "uncut", "directors",
     "imax", "remastered", "limited", "complete", "internal",
     "aac", "ac3", "eac3", "dts%-hd", "dtshd", "dts", "truehd", "atmos",
-    "flac", "mp3", "ddp5%.1", "ddp", "dd5%.1", "dd", "5%.1", "7%.1", "2%.0",
+    "flac", "mp3",
+    -- audio channel layouts: identify() turns '.'/'_' into spaces before
+    -- strip_noise runs, so match the split form (e.g. "5.1" -> "5 1").
+    "ddp5%s1", "ddp", "dd5%s1", "dd", "5%s1", "7%s1", "2%s0",
     "amzn", "nf", "dsnp", "hmax", "atvp", "pcok", "multi", "dual",
 }
 
