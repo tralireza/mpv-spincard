@@ -32,7 +32,8 @@ Online lookup (TMDB) is optional and off unless you add a key.
 - **Season progress** — `S03E08 (/10)` counted from the season folder.
 - **Live TV (Tvheadend)** — playing a Tvheadend stream shows the current
   programme from its EPG: title, channel, plot, a live now-bar with start/end
-  times, and what's up next. Resolved from the stream URL's channel id.
+  times, and an **Up next** list of the following programmes. Resolved from
+  the stream URL's channel id.
 - **Optional TMDB** enrichment for files without a full `.nfo` (needs an API key).
 - Bottom-anchored card that grows upward; shows only for real video (not
   images/audio); toggle key; auto-hide; colour-coded star rating; pill badges.
@@ -91,6 +92,7 @@ show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
 
 enrich=yes   api_key=   language=en-US   # TMDB (optional; empty = local only)
 tvheadend_url=                           # live-TV EPG (e.g. http://127.0.0.1:9981)
+live_upcoming=3                          # live TV: "Up next" programmes to list (0 = none)
 ```
 
 ## Library layout (Kodi / Emby)
@@ -117,10 +119,12 @@ No `.nfo`? The card falls back to the parsed filename (and TMDB, if a key is set
 Point spincard at your [Tvheadend](https://tvheadend.org) server and a live-TV
 stream becomes a now-playing card built from Tvheadend's EPG — current
 programme title, channel, plot, a live progress bar (start/end times, when it
-ends) and the next programme.
+ends) and an **Up next** list of the following programmes (three by default;
+set `live_upcoming`).
 
 ```
 tvheadend_url=http://127.0.0.1:9981
+live_upcoming=3
 ```
 
 It activates whenever the played URL is a Tvheadend stream (`…/stream/channel…`).
@@ -155,9 +159,6 @@ console (`` ` ``):
 ```
 screenshot window     # grabs the window incl. OSD/overlays
 ```
-
-Drop them into `docs/screenshots/` (e.g. `spindisc.png`, `movie.png`); the README
-links them at the top.
 
 ## License
 
