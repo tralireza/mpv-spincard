@@ -39,6 +39,7 @@ local opts = {
     show_tech     = true,  -- local file details (codec/HDR/audio/subs/chapters/…)
     show_fanart    = true, -- dimmed fanart.jpg backdrop (needs ffmpeg)
     fanart_opacity = 0.4,  -- backdrop opacity 0..1 (higher = more visible/darker)
+    fanart_timeout = 3,    -- auto-hide the fanart this many seconds after it appears (0 = keep)
     show_banner    = false, -- wide banner.jpg top-left (opaque JPEG, no alpha)
     banner_height  = 0.10,  -- banner height as a fraction of the video height
     show_logo      = true,  -- clearlogo.png title art, top-left (transparent PNG)
@@ -321,7 +322,15 @@ local function fanart_decode(srcpath, cb)
     end)
 end
 
+-- fanart auto-dismiss: hide just the backdrop a few seconds after it first
+-- appears (opts.fanart_timeout; 0 = keep it for the card's life). `dismissed`
+-- stops the osd-width re-show from reviving it once the timeout has fired; it is
+-- reset by show() each time the card is (re)displayed.
+local fanart_timer = nil
+local fanart_dismissed = false
+
 local function fanart_hide()
+    if fanart_timer then fanart_timer:kill(); fanart_timer = nil end
     if fanart.shown then
         mp.command_native({ "overlay-remove", fanart.id })
         fanart.shown = false
@@ -329,7 +338,7 @@ local function fanart_hide()
 end
 
 local function fanart_show()
-    if not opts.show_fanart or not fanart.ready then return end
+    if not opts.show_fanart or not fanart.ready or fanart_dismissed then return end
     local ow, oh = mp.get_osd_size()
     if not ow or ow == 0 or not oh or oh == 0 then return end
     mp.command_native({
@@ -338,6 +347,14 @@ local function fanart_show()
         w = fanart.w, h = fanart.h, stride = fanart.w * 4, dw = ow, dh = oh,
     })
     fanart.shown = true
+    -- arm the one-shot auto-dismiss the first time the backdrop is actually
+    -- drawn (guard on fanart_timer so osd-width re-shows don't restart it).
+    if opts.fanart_timeout and opts.fanart_timeout > 0 and not fanart_timer then
+        fanart_timer = mp.add_timeout(opts.fanart_timeout, function()
+            fanart_dismissed = true
+            fanart_hide()
+        end)
+    end
 end
 
 -- Banner: wide title art (banner.jpg), opaque, drawn top-left ---------------
@@ -1036,6 +1053,7 @@ show = function(timeout)
     visible = true
     if live_ctx then live_refresh() end -- re-read the EPG each time the card appears
     render()
+    fanart_dismissed = false -- each (re)display restarts the fanart's timed window
     fanart_show()
     poster_show()
     banner_show()
