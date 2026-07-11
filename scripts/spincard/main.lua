@@ -50,7 +50,7 @@ local opts = {
     disc_size      = 0.22,  -- disc diameter as a fraction of the video height
     disc_spin      = true,  -- spin the disc while the card is showing
     disc_spin_secs = 2.5,   -- seconds per full rotation (higher = slower)
-    disc_spin_frames = 64,  -- rotation frames (more = smoother; larger temp file)
+    disc_spin_frames = 96,  -- rotation frames (more = smoother; larger temp file)
 }
 options.read_options(opts, "spincard")
 

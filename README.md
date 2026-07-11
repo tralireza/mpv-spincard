@@ -88,7 +88,7 @@ show_fanart=yes   fanart_opacity=0.6   fanart_timeout=3
 fanart_fade=yes   fanart_fade_frames=16   # fade the backdrop in/out over the timeout
 show_logo=yes     logo_height=0.12
 show_disc=yes     disc_size=0.22
-disc_spin=yes     disc_spin_secs=2.5   disc_spin_frames=64
+disc_spin=yes     disc_spin_secs=2.5   disc_spin_frames=96
 show_banner=no    banner_height=0.10
 show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
 
