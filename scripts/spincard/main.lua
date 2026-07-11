@@ -31,6 +31,7 @@ local opts = {
     enrich    = true,      -- look up online metadata (needs api_key)
     api_key   = "",        -- TMDB API key; empty => filename-only card
     language  = "en-US",   -- TMDB response language
+    tvheadend_url = "",    -- e.g. http://127.0.0.1:9981 — live-TV EPG source ("" = off)
     show_poster   = true,  -- render the local poster image (needs ffmpeg)
     poster_height = 0.42,  -- poster height as a fraction of the video height
     poster_margin = 0.02,  -- gap from the top-right corner (fraction of height; 0 = flush)
@@ -58,6 +59,7 @@ overlay.res_y = RES_Y
 
 local visible, hide_timer, cur_card = false, nil, nil
 local content_ok = false -- true only while a real video (not image/audio) plays
+local live_ctx = nil     -- { path, chan } while a Tvheadend live stream plays
 local logo_rect = nil    -- clearlogo slot in 1280x720 coords, set by build_card
 local card_rect = nil    -- card box rect in 1280x720 coords, set by build_card
 local anim_fade, refresh_timer = 1, nil -- anim_fade stays 1 (fades disabled)
@@ -622,6 +624,107 @@ local function tmdb_fetch(id, cb)
     end
 end
 
+-- Tvheadend live-TV EPG (async curl) ----------------------------------------
+-- Resolve the played stream to a channel, then fetch its current programme.
+-- The stream URL carries a numeric channelid; TVH's own /playlist/channels maps
+-- that id -> channel uuid (the tvg-id), so we key off the URL (robust). A
+-- /stream/channel/<uuid> URL is used directly; the channel name (mpv's
+-- media-title) is the last-resort fallback.
+
+local tvh_map = nil -- { id2uuid = {channelid -> uuid}, name2uuid = {name -> uuid} }
+
+-- Fetch + parse TVH's M3U playlist once: pairs of an #EXTINF (tvg-id + name)
+-- line and the following /stream/channelid/<N> URL.
+local function tvh_get_map(cb)
+    if tvh_map then return cb(tvh_map) end
+    mp.command_native_async({
+        name = "subprocess", playback_only = false, capture_stdout = true,
+        args = { "curl", "-sL", "--max-time", "10", opts.tvheadend_url .. "/playlist/channels" },
+    }, function(ok, res)
+        if not ok or not res or res.status ~= 0 or not res.stdout or res.stdout == "" then
+            msg.warn("tvheadend playlist fetch failed"); return cb(nil)
+        end
+        local m = { id2uuid = {}, name2uuid = {} }
+        local uuid, name
+        for line in res.stdout:gmatch("[^\r\n]+") do
+            local u = line:match('tvg%-id="([^"]+)"')
+            if u then
+                uuid = u
+                name = line:match(",%s*(.-)%s*$")
+                if name then name = name:gsub("^%b{}%s*", "") end -- strip {.} / {@} markers
+            else
+                local cid = line:match("/stream/channelid/(%d+)")
+                if cid and uuid then
+                    m.id2uuid[cid] = uuid
+                    if name and name ~= "" then m.name2uuid[name:lower()] = uuid end
+                    uuid, name = nil, nil
+                end
+            end
+        end
+        tvh_map = m
+        cb(m)
+    end)
+end
+
+-- Path (or media-title) -> channel uuid, else nil.
+local function tvh_resolve(path, chan_name, cb)
+    local direct = path:match("/stream/channel/([%x][%x%-]+)") -- URL is already a uuid
+    if direct then return cb(direct) end
+    tvh_get_map(function(m)
+        if not m then return cb(nil) end
+        local cid = path:match("/stream/channelid/(%d+)")
+        if cid and m.id2uuid[cid] then return cb(m.id2uuid[cid]) end
+        if chan_name and chan_name ~= "" then -- fall back to the channel name
+            local uuid = m.name2uuid[chan_name:lower()]
+            if not uuid then -- ignore a trailing HD/UHD/FHD marker on either side
+                local base = chan_name:lower():gsub("%s+[uf]?hd$", "")
+                for nm, u in pairs(m.name2uuid) do
+                    if nm:gsub("%s+[uf]?hd$", "") == base then uuid = u; break end
+                end
+            end
+            return cb(uuid)
+        end
+        cb(nil)
+    end)
+end
+
+-- Resolve the channel -> its current programme card (or nil).
+local function tvh_fetch(path, chan_name, cb)
+    tvh_resolve(path, chan_name, function(uuid)
+        if not uuid then return cb(nil) end
+        curl_json(string.format("%s/api/epg/events/grid?channel=%s&limit=2",
+            opts.tvheadend_url, urlencode(uuid)), function(e)
+            local ev = e and e.entries and e.entries[1]
+            if not ev then return cb(nil) end
+            local nxt = e.entries[2]
+            cb({
+                kind = "livetv", source = "TVheadend",
+                channel = ev.channelName or chan_name,
+                title = ev.title,
+                subtitle = (ev.subtitle and ev.subtitle ~= "") and ev.subtitle or ev.episodeOnscreen,
+                overview = ev.summary or ev.description,
+                start = tonumber(ev.start), stop = tonumber(ev.stop),
+                next_title = nxt and nxt.title,
+                next_start = nxt and tonumber(nxt.start),
+            })
+        end)
+    end)
+end
+
+-- Re-read the current programme from the EPG for the live channel. Called each
+-- time the card is shown, so it stays current across programme boundaries (the
+-- EPG is otherwise only fetched on channel change).
+local function live_refresh()
+    if not live_ctx then return end
+    local ctx, gen = live_ctx, current_gen
+    tvh_fetch(ctx.path, ctx.chan, function(card)
+        if card and gen == current_gen and live_ctx == ctx then
+            cur_card = card
+            if visible then render() end
+        end
+    end)
+end
+
 -- Render --------------------------------------------------------------------
 
 -- Rounded-rectangle ASS drawing path (corners approximated with beziers).
@@ -681,8 +784,45 @@ local function build_card(c)
         cy = cy + math.floor(fs * 1.25)
     end
 
-    -- heading: text title, OR a reserved slot the clearlogo bitmap fills in
     logo_rect = nil
+    if c.kind == "livetv" then
+        -- Live TV: programme title, channel + episode, plot, a live "now" bar.
+        line(c.title and c.title ~= "" and c.title or (c.channel or "Live TV"), 34, "FFFFFF", true)
+        local sub = c.channel or ""
+        if c.subtitle and c.subtitle ~= "" then
+            sub = (sub ~= "" and (sub .. "   \226\128\162   ") or "") .. c.subtitle
+        end
+        if sub ~= "" then line(sub, 24, "00D7FF") end
+        if c.overview and c.overview ~= "" then
+            cy = cy + 6
+            for _, ln in ipairs(wrap(c.overview, 74, 4)) do line(ln, 22, "C8C8C8") end
+        end
+        if c.start and c.stop and c.stop > c.start then
+            local now = os.time()
+            local pct = math.max(0, math.min(100, (now - c.start) / (c.stop - c.start) * 100))
+            cy = cy + 12
+            local barh = 8
+            local fillw = math.max(2, math.floor(innerw * pct / 100))
+            local bx = x + pad
+            content[#content + 1] = string.format(
+                "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H555555&\\1a&H%s&\\p1}%s{\\p0}",
+                bx, math.floor(cy), fa(64), rrect(innerw, barh, 4))
+            content[#content + 1] = string.format(
+                "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H00D7FF&\\1a&H%s&\\p1}%s{\\p0}",
+                bx, math.floor(cy), fa(0), rrect(fillw, barh, 4))
+            cy = cy + barh + 6
+            line(string.format("%s \226\128\147 %s   \226\128\162   ends %s",
+                os.date("%H:%M", c.start), os.date("%H:%M", c.stop), os.date("%H:%M", c.stop)),
+                18, "A0A0A0")
+        end
+        if c.next_title and c.next_title ~= "" then
+            cy = cy + 4
+            local up = "Up next: " .. c.next_title
+            if c.next_start then up = up .. "  (" .. os.date("%H:%M", c.next_start) .. ")" end
+            line(up, 18, "8C8C8C")
+        end
+    else
+    -- heading: text title, OR a reserved slot the clearlogo bitmap fills in
     if c.has_logo then
         cy = y + 8 -- logo hugs the card's top edge
         local band = math.floor(opts.logo_height * RES_Y)
@@ -830,6 +970,8 @@ local function build_card(c)
         end
     end
 
+    end -- close the livetv / movie-tv content branch
+
     local bh = (cy - y) + pad
     card_rect = { x = x, y = y, w = bw, h = bh }
     local out = {}
@@ -888,6 +1030,7 @@ end
 show = function(timeout)
     if not content_ok then return end
     visible = true
+    if live_ctx then live_refresh() end -- re-read the EPG each time the card appears
     render()
     fanart_show()
     poster_show()
@@ -977,8 +1120,24 @@ local function on_file_loaded()
     current_gen = current_gen + 1
     local gen = current_gen
     content_ok = is_video_playback()
-    if not content_ok then hide(); return end -- no card for images / audio
+    if not content_ok then live_ctx = nil; hide(); return end -- no card for images / audio
     local path = mp.get_property("path") or mp.get_property("filename") or ""
+
+    -- Live TV via Tvheadend EPG (takes priority over file identification).
+    if opts.tvheadend_url ~= "" and path:find("/stream/channel") then
+        -- No library artwork for a live stream: clear anything from a prior file.
+        img_remove(clearlogo); img_remove(disc); disc_spin_stop()
+        poster_hide(); fanart_hide(); banner_hide()
+        poster.ready, fanart.ready, banner.ready, clearlogo.ready, disc.ready =
+            false, false, false, false, false
+        logo_rect, card_rect = nil, nil
+        live_ctx = { path = path, chan = mp.get_property("media-title") or "" }
+        cur_card = { kind = "livetv", title = "Live TV", source = "TVheadend" }
+        if opts.auto_show then show(opts.duration) end -- show() reloads the EPG
+        return
+    end
+    live_ctx = nil -- a normal file: leave live-TV mode
+
     local id = identify(path)
     local poster_path = find_poster(path, id)
     local ep_total = (id.kind == "tv") and count_season_episodes(path, id.season) or nil

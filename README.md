@@ -30,6 +30,9 @@ Online lookup (TMDB) is optional and off unless you add a key.
   resolution · container · size, audio/subtitle languages (channels + forced),
   chapter count, and a **live progress bar** with ETA.
 - **Season progress** — `S03E08 (/10)` counted from the season folder.
+- **Live TV (Tvheadend)** — playing a Tvheadend stream shows the current
+  programme from its EPG: title, channel, plot, a live now-bar with start/end
+  times, and what's up next. Resolved from the stream URL's channel id.
 - **Optional TMDB** enrichment for files without a full `.nfo` (needs an API key).
 - Bottom-anchored card that grows upward; shows only for real video (not
   images/audio); toggle key; auto-hide; colour-coded star rating; pill badges.
@@ -38,7 +41,7 @@ Online lookup (TMDB) is optional and off unless you add a key.
 
 - **mpv** built with Lua (LuaJIT or Lua 5.1/5.2).
 - **ffmpeg** on `PATH` — for the poster / fanart / clearlogo / disc images.
-- **curl** — only if you enable TMDB (`api_key`).
+- **curl** — only if you enable TMDB (`api_key`) or Tvheadend (`tvheadend_url`).
 
 ## Install
 
@@ -87,6 +90,7 @@ show_banner=no    banner_height=0.10
 show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
 
 enrich=yes   api_key=   language=en-US   # TMDB (optional; empty = local only)
+tvheadend_url=                           # live-TV EPG (e.g. http://127.0.0.1:9981)
 ```
 
 ## Library layout (Kodi / Emby)
@@ -107,6 +111,24 @@ TV/Breaking Bad/
 ```
 
 No `.nfo`? The card falls back to the parsed filename (and TMDB, if a key is set).
+
+## Live TV (Tvheadend)
+
+Point spincard at your [Tvheadend](https://tvheadend.org) server and a live-TV
+stream becomes a now-playing card built from Tvheadend's EPG — current
+programme title, channel, plot, a live progress bar (start/end times, when it
+ends) and the next programme.
+
+```
+tvheadend_url=http://127.0.0.1:9981
+```
+
+It activates whenever the played URL is a Tvheadend stream (`…/stream/channel…`).
+The channel is resolved from the URL's `channelid` via Tvheadend's own playlist
+(`/playlist/channels`, where `tvg-id` is the channel UUID), falling back to the
+channel name (mpv's `media-title`). Only the EPG is read — no artwork or TMDB
+lookups for live TV. If your server needs auth, embed it in the URL
+(`http://user:pass@host:9981`).
 
 ## How it works
 
