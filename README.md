@@ -34,7 +34,9 @@ Online lookup (TMDB) is optional and off unless you add a key.
   programme from its EPG: title, channel, plot, a live now-bar with start/end
   times, and an **Up next** list of the following programmes. Resolved from
   the stream URL's channel id.
-- **Optional TMDB** enrichment for files without a full `.nfo` (needs an API key).
+- **Optional TMDB** enrichment for files without a full `.nfo`, plus an hourly
+  **rating refresh** from TMDB for any card — rating is treated as dynamic, so
+  even a local `.nfo` card gets a live rating (both need an API key).
 - Bottom-anchored card that grows upward; shows only for real video (not
   images/audio); toggle key; auto-hide; colour-coded star rating; pill badges.
 
@@ -93,6 +95,7 @@ show_banner=no    banner_height=0.10
 show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
 
 enrich=yes   api_key=   language=en-US   # TMDB (optional; empty = local only)
+rating_ttl=3600                          # refresh rating from TMDB when older than this (s); 0 = off
 tvheadend_url=                           # live-TV EPG (e.g. http://127.0.0.1:9981)
 live_upcoming=3                          # live TV: "Up next" programmes to list (0 = none)
 ```

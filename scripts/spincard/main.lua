@@ -31,6 +31,7 @@ local opts = {
     enrich    = true,      -- look up online metadata (needs api_key)
     api_key   = "",        -- TMDB API key; empty => filename-only card
     language  = "en-US",   -- TMDB response language
+    rating_ttl = 3600,     -- refresh rating from TMDB when the cached value is older than this (s); 0 = off
     tvheadend_url = "",    -- e.g. http://127.0.0.1:9981 — live-TV EPG source ("" = off)
     live_upcoming = 3,     -- live TV: how many upcoming programmes to list under "Up next" (0 = none)
     show_poster   = true,  -- render the local poster image (needs ffmpeg)
@@ -152,6 +153,24 @@ end
 local function cache_put(key, tbl)
     local f = io.open(cache_path(key), "w"); if not f then return end
     f:write(utils.format_json(tbl)); f:close()
+end
+
+-- Rating is a dynamic property: cached separately with a short TTL (rating_ttl)
+-- so it can be refreshed from TMDB even when the card itself is a local .nfo.
+-- Stored as { v = rating, t = os.time } under a "rating/<key>" entry; only a
+-- positive rating is kept, so a 0 / no-vote TMDB result won't clobber a valid
+-- source rating.
+local function rating_get(cachekey)
+    local rc = cache_get("rating/" .. cachekey)
+    if rc and rc.v then return tonumber(rc.v), tonumber(rc.t) end
+end
+local function rating_put(cachekey, r)
+    r = tonumber(r)
+    if r and r > 0 then cache_put("rating/" .. cachekey, { v = r, t = os.time() }) end
+end
+local function rating_stale(t)
+    local ttl = tonumber(opts.rating_ttl) or 0
+    return (not t) or (os.time() - t) >= ttl
 end
 
 -- Local sidecars (.nfo metadata + poster image) -----------------------------
@@ -1247,6 +1266,16 @@ local function on_file_loaded()
             poster_path and " [poster]" or ""))
     end
 
+    -- Rating is a dynamic property: show the freshest cached rating now
+    -- (overriding the source rating), and refetch on load when missing/stale.
+    -- do_tmdb already returns a rating, so only fetch rating-only when it won't.
+    local do_rating = false
+    if opts.enrich and opts.api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0 then
+        local rv, rt = rating_get(id.cachekey)
+        if rv then cur_card.rating = rv end
+        if not do_tmdb and rating_stale(rt) then do_rating = true end
+    end
+
     -- Poster image: decode the local jpg (once per poster), show when ready.
     poster_hide()
     if opts.show_poster and poster_path then
@@ -1322,8 +1351,20 @@ local function on_file_loaded()
         tmdb_fetch(id, function(card)
             if not card then return end
             cache_put(id.cachekey, card)
+            rating_put(id.cachekey, card.rating) -- seed the dynamic rating cache
             if gen ~= current_gen then return end
             cur_card = merged(card)
+            if visible then render() end
+        end)
+    elseif do_rating then
+        -- rating-only refresh (local .nfo card, or a stale cache hit): update
+        -- just the rating, leaving the authoritative source card intact.
+        tmdb_fetch(id, function(card)
+            local r = card and tonumber(card.rating)
+            if not r or r <= 0 then return end
+            rating_put(id.cachekey, r)
+            if gen ~= current_gen then return end
+            cur_card.rating = r
             if visible then render() end
         end)
     end
