@@ -130,19 +130,6 @@ local function fmt_fps(f)
     return (string.format("%.3f", f):gsub("%.?0+$", ""))
 end
 
--- Live playback progress (recomputed each render). nil unless mid-file.
-local function progress_line()
-    local pct = mp.get_property_number("percent-pos")
-    if not pct or pct < 1 or pct > 99.5 then return nil end
-    local parts = { string.format("%d%%", math.floor(pct + 0.5)) }
-    local rem = mp.get_property_number("time-remaining")
-    if rem and rem > 0 then
-        parts[#parts + 1] = fmt_duration(rem) .. " left"
-        parts[#parts + 1] = "ends " .. os.date("%H:%M", os.time() + math.floor(rem))
-    end
-    return "\226\150\182 " .. table.concat(parts, "   \226\128\162   ") -- ▶
-end
-
 -- Disk cache ----------------------------------------------------------------
 
 local CACHE_DIR = (os.getenv("HOME") or "/tmp") .. "/.cache/spincard"
