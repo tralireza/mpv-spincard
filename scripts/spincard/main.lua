@@ -38,7 +38,7 @@ local opts = {
     poster_margin = 0.02,  -- gap from the top-right corner (fraction of height; 0 = flush)
     show_tech     = true,  -- local file details (codec/HDR/audio/subs/chapters/…)
     show_fanart    = true, -- dimmed fanart.jpg backdrop (needs ffmpeg)
-    fanart_opacity = 0.4,  -- backdrop opacity 0..1 (higher = more visible/darker)
+    fanart_opacity = 0.6,  -- backdrop / fade-peak opacity 0..1 (higher = more visible/darker)
     fanart_timeout = 3,    -- fanart lifetime: hide it this many seconds after it appears (0 = keep)
     fanart_fade    = true, -- fade the fanart in (0.1→fanart_opacity) then out (→0) over fanart_timeout
     fanart_fade_frames = 16, -- fade smoothness: pre-rendered opacity steps (more = smoother/heavier)

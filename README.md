@@ -84,7 +84,7 @@ anchor=bottom          # "bottom" (hug bottom, grow up) or "top"
 pos_x=40  pos_y=40     # margin in a 1280x720 virtual space
 
 show_poster=yes   poster_height=0.42   poster_margin=0.02
-show_fanart=yes   fanart_opacity=0.4   fanart_timeout=3
+show_fanart=yes   fanart_opacity=0.6   fanart_timeout=3
 fanart_fade=yes   fanart_fade_frames=16   # fade the backdrop in/out over the timeout
 show_logo=yes     logo_height=0.12
 show_disc=yes     disc_size=0.22
