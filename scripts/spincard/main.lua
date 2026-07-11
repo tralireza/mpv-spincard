@@ -1353,8 +1353,26 @@ if opts.show_on_pause then
     end)
 end
 
+-- Runtime toggle: fanart fade in/out  <->  hard show-then-hide. Flips
+-- opts.fanart_fade and re-decodes the current backdrop in the new mode so the
+-- switch is visible immediately. Bind by name in input.conf, e.g.:
+--   f script-binding spincard/toggle-fanart-fade
+local function toggle_fanart_fade()
+    opts.fanart_fade = not opts.fanart_fade
+    mp.osd_message("spincard: fanart " .. (opts.fanart_fade and "fade in/out" or "show then hide"))
+    if not (opts.show_fanart and fanart.ready and fanart.src and not live_ctx) then return end
+    local gen = current_gen
+    fanart_hide()
+    fanart.ready = false
+    fanart_dismissed, fanart.fade_idx = false, 0
+    fanart_decode(fanart.src, function(ok)
+        if ok and gen == current_gen and visible then fanart_show() end
+    end)
+end
+
 local bind_key = (opts.key ~= "") and opts.key or nil
 mp.add_key_binding(bind_key, "toggle", toggle)
+mp.add_key_binding(nil, "toggle-fanart-fade", toggle_fanart_fade)
 
 -- The VO/OSD often isn't ready when a poster finishes decoding at playback
 -- start, so overlay-add would use a zero size and skip. Re-show once the OSD

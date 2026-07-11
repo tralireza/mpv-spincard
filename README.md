@@ -59,6 +59,7 @@ tmux/SSH, `Ctrl+<letter>` collides with Tab/Enter/Esc):
 
 ```
 c script-binding spincard/toggle
+f script-binding spincard/toggle-fanart-fade   # optional: fanart fade ⟷ show-then-hide
 ```
 
 Or push to a remote host with the included helper:
