@@ -940,11 +940,24 @@ local function build_card(c)
         line(sub, 25, "00D7FF")
     end
 
-    -- rating: colour-coded stars
+    -- rating: colour-coded stars, plus a source pill (e.g. TMDB) right-aligned on
+    -- the row when the shown rating is remote-sourced (c.rating_src).
     local rscore = tonumber(c.rating)
     if rscore and rscore > 0 then
         local stars, scolor = star_rating(rscore)
+        local ry = cy
         line(string.format("%s  %.1f", stars, rscore), 23, scolor, true)
+        if c.rating_src and c.rating_src ~= "" then
+            local t, pfs, ph, ppadx = c.rating_src, 15, 24, 9
+            local pw = math.floor(#t * pfs * 0.62 + 2 * ppadx)
+            local ppx = x + pad + innerw - pw -- right-align to the card inner width
+            content[#content + 1] = string.format(
+                "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H%s&\\1a&H%s&\\p1}%s{\\p0}",
+                ppx, math.floor(ry + 2), "E4B401", fa(16), rrect(pw, ph, 8))
+            content[#content + 1] = string.format(
+                "{\\an7\\pos(%d,%d)\\alpha&H%s&\\bord0\\shad0\\1c&H%s&\\fs%d\\b1}%s",
+                ppx + ppadx, math.floor(ry + 6), fa(0), "FFFFFF", pfs, ass_escape(t))
+        end
     end
 
     -- meta: aired · runtime · mpaa
@@ -1260,6 +1273,7 @@ local function on_file_loaded()
             kind = id.kind, title = id.display, year = id.year,
             season = id.season, episode = id.episode, source = "file",
         })
+        if cached then cur_card.rating_src = "TMDB" end
         do_tmdb = (not cached) and opts.enrich and opts.api_key ~= ""
         msg.verbose(string.format("identified %s: '%s'%s%s", id.kind, id.query or "",
             id.season and string.format(" S%02dE%02d", id.season, id.episode) or "",
@@ -1272,7 +1286,7 @@ local function on_file_loaded()
     local do_rating = false
     if opts.enrich and opts.api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0 then
         local rv, rt = rating_get(id.cachekey)
-        if rv then cur_card.rating = rv end
+        if rv then cur_card.rating, cur_card.rating_src = rv, "TMDB" end
         if not do_tmdb and rating_stale(rt) then do_rating = true end
     end
 
@@ -1354,6 +1368,7 @@ local function on_file_loaded()
             rating_put(id.cachekey, card.rating) -- seed the dynamic rating cache
             if gen ~= current_gen then return end
             cur_card = merged(card)
+            cur_card.rating_src = "TMDB"
             if visible then render() end
         end)
     elseif do_rating then
@@ -1364,7 +1379,7 @@ local function on_file_loaded()
             if not r or r <= 0 then return end
             rating_put(id.cachekey, r)
             if gen ~= current_gen then return end
-            cur_card.rating = r
+            cur_card.rating, cur_card.rating_src = r, "TMDB"
             if visible then render() end
         end)
     end
