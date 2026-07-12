@@ -34,6 +34,9 @@ local opts = {
     rating_ttl = 3600,     -- refresh rating from TMDB when the cached value is older than this (s); 0 = off
     tvheadend_url = "",    -- e.g. http://127.0.0.1:9981 — live-TV EPG source ("" = off)
     live_upcoming = 3,     -- live TV: how many upcoming programmes to list under "Up next" (0 = none)
+    live_signal   = true,  -- live TV: show tuner signal strength / SNR meter (needs tvheadend_url)
+    live_signal_interval = 3, -- live TV: seconds between signal polls while the card is visible (0 = read once on show)
+    signal_dbm_max = -40.6, -- live TV: dBm that fills the signal meter (tuner's max; meter spans 50 dB below it)
     show_poster   = true,  -- render the local poster image (needs ffmpeg)
     poster_height = 0.42,  -- poster height as a fraction of the video height
     poster_margin = 0.02,  -- gap from the top-right corner (fraction of height; 0 = flush)
@@ -65,6 +68,9 @@ overlay.res_y = RES_Y
 local visible, hide_timer, cur_card = false, nil, nil
 local content_ok = false -- true only while a real video (not image/audio) plays
 local live_ctx = nil     -- { path, chan } while a Tvheadend live stream plays
+local cur_signal = nil   -- latest live-TV tuner reading (or nil); read directly by build_card
+local signal_timer = nil -- periodic signal poll while the live card is visible
+local signal_inflight = false -- guards overlapping polls (two chained curls per poll)
 local logo_rect = nil    -- clearlogo slot in 1280x720 coords, set by build_card
 local card_rect = nil    -- card box rect in 1280x720 coords, set by build_card
 local anim_fade, refresh_timer = 1, nil -- anim_fade stays 1 (fades disabled)
@@ -795,6 +801,136 @@ local function tvh_fetch(path, chan_name, cb)
     end)
 end
 
+-- Tvheadend tuner signal (async curl) --------------------------------------
+-- Signal/SNR live on the DVB *input*; the channel lives on the *subscription*;
+-- they join by the input name being the prefix of the subscription's service.
+-- Values are scale-tagged: 1 = relative (0..65535 → %), 2 = decibel (milli-dB →
+-- dB/dBm), 0 = unknown. Bitrate is the per-channel subscription rate (never the
+-- input's whole-transponder bps). cb(nil) when there is no RF telemetry.
+
+-- Convert a scaled Tvheadend value: returns (value, is_percent) or nil.
+local function tvh_scaled(v, scale)
+    v, scale = tonumber(v), tonumber(scale)
+    if not v or not scale or scale == 0 then return nil end
+    if scale == 1 then return v / 65535 * 100, true end -- relative %
+    if scale == 2 then return v / 1000, false end       -- decibel (milli-dB)
+    return nil
+end
+
+-- Per-metric quality level 1..4: % (relative), dB (SNR), dBm (signal strength).
+-- Rough DVB-S ballparks — they drive the meter fill + colour only.
+local function level_pct(p) return (p >= 80 and 4) or (p >= 60 and 3) or (p >= 40 and 2) or 1 end
+local function level_db(d)  return (d >= 12 and 4) or (d >= 9 and 3) or (d >= 6 and 2) or 1 end
+local function level_dbm(s) return (s >= -45 and 4) or (s >= -55 and 3) or (s >= -65 and 2) or 1 end
+
+-- BGR colour (ASS is &HBBGGRR&) for a level: 3-4 green, 2 amber, 1 red.
+local function tier_color(t)
+    if t >= 3 then return "78C878" end -- green
+    if t == 2 then return "18C5F5" end -- amber (BGR!)
+    return "5050E0"                    -- red
+end
+
+-- Normalise a TVH channel label: drop TVH's leading space + a {.}/{@} marker,
+-- lowercase, tolerate a trailing HD/UHD/FHD marker (matches tvh_resolve).
+local function chan_norm(s)
+    s = tostring(s or ""):gsub("^%s*", ""):gsub("^%b{}%s*", ""):lower()
+    return (s:gsub("%s+[uf]?hd$", ""))
+end
+
+-- Mux (transponder) parameters, fetched once and memoised: name -> {delsys,
+-- freq (kHz), symrate (sym/s), mod, fec, pol}. The mux name equals the first
+-- token of an input's `stream` field (e.g. "11641H in Astra 28.2E" -> "11641H").
+local tvh_muxes = nil
+local function tvh_get_muxes(cb)
+    if tvh_muxes then return cb(tvh_muxes) end
+    curl_json(opts.tvheadend_url .. "/api/mpegts/mux/grid?limit=1000", function(d)
+        local m = {}
+        if d and d.entries then
+            for _, e in ipairs(d.entries) do
+                if e.name and e.delsys then -- DVB muxes carry delsys; IPTV ones don't
+                    m[e.name] = { delsys = e.delsys, freq = tonumber(e.frequency),
+                        symrate = tonumber(e.symbolrate), mod = e.modulation,
+                        fec = e.fec, pol = e.polarisation }
+                end
+            end
+        end
+        tvh_muxes = m
+        cb(m)
+    end)
+end
+
+local function tvh_signal(chan_name, cb)
+    local want = chan_norm(chan_name)
+    curl_json(opts.tvheadend_url .. "/api/status/subscriptions", function(subs)
+        local list = subs and subs.entries
+        if not list then return cb(nil) end
+        -- Pick our subscription: prefer client=="libmpv"; disambiguate by name
+        -- only when more than one exists. Any named match is a last resort.
+        local mpvsubs, namematch = {}, nil
+        for _, s in ipairs(list) do
+            if s.service and s.service ~= "" then
+                if s.client == "libmpv" then mpvsubs[#mpvsubs + 1] = s end
+                if chan_norm(s.channel) == want then namematch = namematch or s end
+            end
+        end
+        local chosen
+        if #mpvsubs == 1 then
+            chosen = mpvsubs[1]
+        elseif #mpvsubs > 1 then
+            for _, s in ipairs(mpvsubs) do if chan_norm(s.channel) == want then chosen = s; break end end
+            chosen = chosen or mpvsubs[1]
+        else
+            chosen = namematch
+        end
+        if not chosen then return cb(nil) end
+        local service = chosen.service
+        local rate = tonumber(chosen.out) or tonumber(chosen["in"]) -- bytes/s (prefer delivered)
+
+        curl_json(opts.tvheadend_url .. "/api/status/inputs", function(inps)
+            local ilist = inps and inps.entries
+            if not ilist then return cb(nil) end
+            -- Join by plain-string prefix (input name has Lua magic chars).
+            local inp
+            for _, it in ipairs(ilist) do
+                local nm = it.input
+                if nm and nm ~= "" and service:sub(1, #nm) == nm
+                    and service:sub(#nm + 1, #nm + 1) == "/" then
+                    inp = it; break
+                end
+            end
+            if not inp then -- fallback: exactly one active input (one tuner in use)
+                local active = {}
+                for _, it in ipairs(ilist) do
+                    if (tonumber(it.subs) or 0) >= 1 then active[#active + 1] = it end
+                end
+                if #active == 1 then inp = active[1] end
+            end
+            if not inp then return cb(nil) end
+
+            local rd = { ber = tonumber(inp.ber) or 0, unc = tonumber(inp.unc) or 0 }
+            rd.clean = (rd.ber == 0 and rd.unc == 0)
+            local sv, sp = tvh_scaled(inp.signal, inp.signal_scale)
+            if sv then
+                rd.sig, rd.sig_unit = sv, (sp and "%" or "dBm")
+                rd.sig_level = sp and level_pct(sv) or level_dbm(sv)
+            end
+            local nv, np = tvh_scaled(inp.snr, inp.snr_scale)
+            if nv then
+                rd.snr, rd.snr_unit = nv, (np and "%" or "dB")
+                rd.snr_level = np and level_pct(nv) or level_db(nv)
+            end
+            if not rd.sig and not rd.snr then return cb(nil) end -- no RF telemetry (scale 0)
+            if rate then rd.mbps = rate * 8 / 1e6 end
+            local muxname = (inp.stream or ""):match("^(%S+)") -- e.g. "11641H"
+            if muxname then
+                if tvh_muxes then rd.mux = tvh_muxes[muxname]
+                else tvh_get_muxes(function() end) end -- warm the cache for the next poll
+            end
+            cb(rd)
+        end)
+    end)
+end
+
 -- Re-read the current programme from the EPG for the live channel. Called each
 -- time the card is shown, so it stays current across programme boundaries (the
 -- EPG is otherwise only fetched on channel change).
@@ -806,6 +942,23 @@ local function live_refresh()
             cur_card = card
             if visible then render() end
         end
+    end)
+end
+
+-- Poll the tuner signal for the live channel and update cur_signal (kept apart
+-- from cur_card so the EPG refresh's wholesale `cur_card = card` can't wipe it).
+-- Guarded like live_refresh, plus an in-flight flag so a slow poll (two chained
+-- curls) can't stack under the periodic timer / short interval.
+local function live_signal_refresh()
+    if not (live_ctx and opts.live_signal) then return end
+    if signal_inflight then return end
+    signal_inflight = true
+    local ctx, gen = live_ctx, current_gen
+    tvh_signal(ctx.chan, function(rd)
+        signal_inflight = false -- cb always fires exactly once (all paths), so this clears every time
+        if gen ~= current_gen or live_ctx ~= ctx or not opts.live_signal then return end
+        cur_signal = rd
+        if visible then render() end
     end)
 end
 
@@ -842,6 +995,49 @@ local function res_label(w)
     if w >= 1900 then return "1080p" end
     if w >= 1200 then return "720p" end
     return "SD"
+end
+
+-- Format a scaled tuner metric: "72%" (relative) or "-42.9 dBm" / "12.3 dB".
+local function fmt_metric(v, unit)
+    if unit == "%" then return string.format("%d%%", math.floor(v + 0.5)) end
+    return string.format("%.1f %s", v, unit)
+end
+
+-- Approx rendered width (virtual px) of a UTF-8 string at font size fs — libass
+-- has no text-measure API, so we sum per-character advances (slightly generous so
+-- runs never overlap). Per-char (not flat) keeps label→meter gaps consistent
+-- regardless of how narrow the letters are (e.g. "Signal " vs "SNR ").
+local function text_w(s, fs)
+    local w, i, n = 0, 1, #s
+    while i <= n do
+        local b = s:byte(i)
+        if b < 128 then
+            local c = s:sub(i, i)
+            if c == " " or c:match("[iIjl.,:;!'|]") then w = w + 0.32
+            elseif c:match("[ftr()%-]") then w = w + 0.42
+            elseif c == "m" or c == "w" or c == "M" or c == "W" then w = w + 0.95
+            elseif c:match("[A-Z]") or c == "%" then w = w + 0.72
+            else w = w + 0.62 end
+            i = i + 1
+        else -- multibyte glyph: count as one wide symbol, skip continuation bytes
+            w = w + 0.75; i = i + 1
+            while i <= n and s:byte(i) >= 128 and s:byte(i) < 192 do i = i + 1 end
+        end
+    end
+    return w * fs
+end
+
+-- Display fraction 0..1 for the bar fill (rough ranges — lit count only). Signal
+-- dBm fills a 50 dB window whose top is the tuner's configured max (signal_dbm_max,
+-- default the observed DS3000 ceiling); % maps directly; SNR dB ~ 0..20.
+local function metric_frac(v, unit)
+    local f
+    if unit == "%" then f = v / 100
+    elseif unit == "dBm" then
+        local top = tonumber(opts.signal_dbm_max) or -40
+        f = (v - (top - 50)) / 50
+    else f = v / 20 end -- dB
+    return math.max(0, math.min(1, f))
 end
 
 local function build_card(c)
@@ -898,6 +1094,110 @@ local function build_card(c)
             line(string.format("%s \226\128\147 %s   \226\128\162   ends %s",
                 os.date("%H:%M", c.start), os.date("%H:%M", c.stop), os.date("%H:%M", c.stop)),
                 18, "A0A0A0")
+        end
+        -- live tuner signal meter: dBm • SNR as a segmented [████░░] gauge (filled
+        -- = quality colour, empty = dim) • bitrate • a ✔/✗ health tick. One \pos'd
+        -- event assembled from inline {\1c} colour spans (libass advances the pen;
+        -- line() can't carry tags). Read from module-level cur_signal so the EPG
+        -- refresh can't clobber it; whole row (incl. its gaps) is gated on it.
+        -- signal meter row: labels/values as \pos'd text runs, the 8-step meters
+        -- as crisp \p1 vector rectangles (same drawing mechanism as the card's
+        -- rounded box / progress bars) for full-pixel smoothness. A left-to-right
+        -- cursor `cx` places each piece — text widths estimated (text_w), meter
+        -- widths exact. Each piece keeps its own \pos so the bottom-anchor shift
+        -- still moves the whole row.
+        if cur_signal then
+            local sg = cur_signal
+            cy = cy + 8
+            local fs = 18
+            local DIM, TXT = "A0A0A0", "C8C8C8" -- label / value (BGR)
+            local cx, y0 = x + pad, cy
+            local function put(str, color)
+                content[#content + 1] = string.format(
+                    "{\\an7\\pos(%d,%d)\\bord2\\shad1\\3c&H000000&\\1c&H%s&\\fs%d}%s",
+                    math.floor(cx), math.floor(y0), color, fs, ass_escape(str))
+                cx = cx + text_w(str, fs)
+            end
+            local function sepc() cx = cx + 34 end -- fixed gap between groups (no bullet)
+
+            -- 8-step vector meter (no frame): dim + lit bars, each a \p1 drawing at
+            -- the same \pos (separate events don't share the pen).
+            local NB, BW, G, H = 8, 6, 2, 14 -- bars, bar width, gap, height
+            local WM = NB * BW + (NB - 1) * G
+            local function meter(frac, level)
+                local lit = math.max(0, math.min(NB, math.floor(frac * NB + 0.5)))
+                local litp, dimp = {}, {}
+                for i = 1, NB do
+                    local h = math.floor(H * i / NB + 0.5)
+                    local bx = (i - 1) * (BW + G)
+                    local r = string.format("m %d %d l %d %d %d %d %d %d",
+                        bx, H - h, bx + BW, H - h, bx + BW, H, bx, H)
+                    if i <= lit then litp[#litp + 1] = r else dimp[#dimp + 1] = r end
+                end
+                local function draw(color, path)
+                    content[#content + 1] = string.format(
+                        "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H%s&\\p1}%s{\\p0}",
+                        math.floor(cx), math.floor(y0), color, path)
+                end
+                if #dimp > 0 then draw("555555", table.concat(dimp, " ")) end
+                if #litp > 0 then draw(tier_color(level or 1), table.concat(litp, " ")) end
+                cx = cx + WM + 6 -- trailing breathing room before the value
+            end
+
+            local wrote = false
+            if sg.sig then
+                put("Signal ", DIM); meter(metric_frac(sg.sig, sg.sig_unit), sg.sig_level)
+                put(fmt_metric(sg.sig, sg.sig_unit), TXT); wrote = true
+            end
+            if sg.snr then
+                if wrote then sepc() end
+                put("SNR ", DIM); meter(metric_frac(sg.snr, sg.snr_unit), sg.snr_level)
+                put(fmt_metric(sg.snr, sg.snr_unit), TXT); wrote = true
+            end
+            if sg.mbps then
+                if wrote then sepc() end
+                put(string.format("%.1f Mbps", sg.mbps), TXT); wrote = true
+            end
+            if wrote then sepc() end
+            put(sg.clean and "\226\156\148" or "\226\156\151", sg.clean and "78C878" or "5050E0")
+            cy = cy + math.floor(fs * 1.25)
+        end
+        -- transponder line: delivery system, polarisation and modulation as pill
+        -- badges (tech-pill style); frequency + symbol rate as plain text between.
+        if cur_signal and cur_signal.mux then
+            local m = cur_signal.mux
+            cy = cy + 8
+            local tfs, y0 = 17, cy
+            local cx = x + pad
+            local function txt(s)
+                content[#content + 1] = string.format(
+                    "{\\an7\\pos(%d,%d)\\bord2\\shad1\\3c&H000000&\\1c&H8C8C8C&\\fs%d}%s",
+                    math.floor(cx), math.floor(y0), tfs, ass_escape(s))
+                cx = cx + text_w(s, tfs)
+            end
+            local function pill(s, bg, fg)
+                local padx, ph = 8, tfs + 8
+                local pw = math.floor(text_w(s, tfs) + 2 * padx)
+                content[#content + 1] = string.format(
+                    "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H%s&\\1a&H%s&\\p1}%s{\\p0}",
+                    math.floor(cx), math.floor(y0 - 4), bg, fa(16), rrect(pw, ph, 7))
+                content[#content + 1] = string.format(
+                    "{\\an7\\pos(%d,%d)\\alpha&H%s&\\bord0\\shad0\\1c&H%s&\\fs%d\\b1}%s",
+                    math.floor(cx + padx), math.floor(y0), fa(0), fg, tfs, ass_escape(s))
+                cx = cx + pw + 8
+            end
+            local ACC = "00D7FF" -- card accent (gold, BGR): delivery system + modulation
+            pill(m.delsys or "DVB-S", ACC, "000000")
+            if m.freq then cx = cx + 2; txt(string.format("%d MHz", math.floor(m.freq / 1000 + 0.5))); cx = cx + 8 end
+            -- polarisation colour-coded (BGR): V = blue, H = violet — distinct from the quality colours
+            if m.pol then pill(m.pol, (m.pol == "V") and "F5963C" or "F082B4", "FFFFFF") end
+            if m.symrate then cx = cx + 2; txt(string.format("%.1f MSym/s", m.symrate / 1e6)); cx = cx + 8 end
+            if m.mod and m.mod ~= "" then
+                local mod = (m.mod:gsub("PSK/8", "8PSK"))
+                if m.fec and m.fec ~= "AUTO" and m.fec ~= "NONE" then mod = mod .. " " .. m.fec end
+                pill(mod, ACC, "000000")
+            end
+            cy = y0 + tfs + 8
         end
         if c.upcoming and #c.upcoming > 0 then
             cy = cy + 6
@@ -1121,6 +1421,7 @@ end
 hide = function()
     if hide_timer then hide_timer:kill(); hide_timer = nil end
     if refresh_timer then refresh_timer:kill(); refresh_timer = nil end
+    if signal_timer then signal_timer:kill(); signal_timer = nil end
     overlay:remove()
     fanart_hide()
     poster_hide()
@@ -1143,6 +1444,20 @@ show = function(timeout)
     poster_show()
     banner_show()
     disc_spin_start()
+
+    -- live tuner signal: kill-before-create (show() is re-entered without hide()
+    -- on channel change / live→file), an immediate reading, then poll on its own
+    -- cadence. Recreated only for a live card with the feature on.
+    if signal_timer then signal_timer:kill(); signal_timer = nil end
+    if live_ctx and opts.live_signal then
+        live_signal_refresh()
+        local iv = tonumber(opts.live_signal_interval) or 0
+        if iv > 0 then
+            signal_timer = mp.add_periodic_timer(iv, function()
+                if visible then live_signal_refresh() end
+            end)
+        end
+    end
 
     -- live-refresh the progress bar / ETA while the card is visible
     if refresh_timer then refresh_timer:kill() end
@@ -1226,6 +1541,7 @@ end
 local function on_file_loaded()
     current_gen = current_gen + 1
     local gen = current_gen
+    cur_signal = nil -- new file: drop any prior tuner reading (a fresh channel re-polls)
     content_ok = is_video_playback()
     if not content_ok then live_ctx = nil; hide(); return end -- no card for images / audio
     local path = mp.get_property("path") or mp.get_property("filename") or ""
