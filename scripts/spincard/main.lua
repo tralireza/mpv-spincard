@@ -41,7 +41,7 @@ local opts = {
     show_fanart    = true, -- dimmed fanart.jpg backdrop (needs ffmpeg)
     fanart_opacity = 0.6,  -- backdrop / fade-peak opacity 0..1 (higher = more visible/darker)
     fanart_timeout = 3,    -- fanart lifetime: hide it this many seconds after it appears (0 = keep)
-    fanart_fade    = true, -- fade the fanart in (0.1→fanart_opacity) then out (→0) over fanart_timeout
+    fanart_fade    = true, -- fade fanart in (0.1→fanart_opacity) then out (→0.1, held) over fanart_timeout
     fanart_fade_frames = 16, -- fade smoothness: pre-rendered opacity steps (more = smoother/heavier)
     show_banner    = false, -- wide banner.jpg top-left (opaque JPEG, no alpha)
     banner_height  = 0.10,  -- banner height as a fraction of the video height
@@ -301,7 +301,7 @@ local fanart = {
 }
 local FANART_H = 720        -- decode height for the static (non-fade) backdrop
 local FANART_FADE_H = 360   -- decode height per fade frame (kept small: N frames packed)
-local FANART_FADE_MIN = 0.1 -- fade-in floor opacity (rises from here to fanart_opacity)
+local FANART_FADE_MIN = 0.1 -- fade floor opacity (0.1 → fanart_opacity → 0.1, then held)
 
 local function find_fanart(path, id)
     local dir = path:match("^(.*)/[^/]+$") or "."
@@ -339,8 +339,8 @@ local function fanart_decode(srcpath, cb)
         local d = nf - 1
         local frac = "N/" .. d
         local env = string.format(
-            "if(lte(%s\\,0.5)\\,%.4f+(%.4f-%.4f)*2*(%s)\\,%.4f*(2-2*(%s)))",
-            frac, lo, peak, lo, frac, peak, frac)
+            "if(lte(%s\\,0.5)\\,%.4f+(%.4f-%.4f)*2*(%s)\\,%.4f+(%.4f-%.4f)*2*(1-(%s)))",
+            frac, lo, peak, lo, frac, lo, peak, lo, frac)
         local vf = string.format(
             "scale=-2:%d,format=rgba,loop=loop=%d:size=1:start=0,"
                 .. "geq=r=r(X\\,Y)*%s:g=g(X\\,Y)*%s:b=b(X\\,Y)*%s:a=alpha(X\\,Y)*%s",
@@ -401,18 +401,21 @@ local function fanart_draw()
 end
 
 local function fanart_show()
-    if not opts.show_fanart or not fanart.ready or fanart_dismissed then return end
-    if not fanart_draw() then return end -- OSD size not known yet; retried via osd-width
-    if fanart_timer then return end      -- already animating (e.g. an osd-width re-show)
+    if not opts.show_fanart or not fanart.ready then return end
     local nf = fanart.frames or 1
+    if nf <= 1 and fanart_dismissed then return end -- static backdrop stays hard-hidden
+    if not fanart_draw() then return end            -- OSD not ready yet; retried via osd-width
+    if fanart_dismissed then return end             -- fade done: hold the final (0.1) frame, no timer
+    if fanart_timer then return end                 -- already animating (e.g. an osd-width re-show)
     if nf > 1 then
-        -- fade: advance one frame per tick, remove the backdrop after the last
+        -- fade in then out to the FANART_FADE_MIN floor, and HOLD the final frame
         local step = (tonumber(opts.fanart_timeout) or 3) / (nf - 1)
         fanart_timer = mp.add_periodic_timer(step, function()
             fanart.fade_idx = (fanart.fade_idx or 0) + 1
             if fanart.fade_idx >= nf then
+                fanart.fade_idx = nf - 1 -- clamp to the final (0.1) frame and leave it drawn
                 fanart_dismissed = true
-                fanart_hide() -- kills this timer + removes the overlay
+                if fanart_timer then fanart_timer:kill(); fanart_timer = nil end
             else
                 fanart_draw()
             end
