@@ -4,10 +4,18 @@
 --   luajit -e 'local I=dofile("identify.lua"); print(require"..."...)'
 --
 -- Returns a table:
---   TV    -> { kind="tv",    query=<show>,  display=<Show>, season=N, episode=N, cachekey=... }
---   movie -> { kind="movie", query=<title>, display=<Title>, year=YYYY|nil,     cachekey=... }
+--   TV      -> { kind="tv",      query=<show>,  display=<Show>, season=N, episode=N, cachekey=... }
+--   movie   -> { kind="movie",   query=<title>, display=<Title>, year=YYYY|nil,     cachekey=... }
+--   unknown -> { kind="unknown", display=<full file name>, cachekey=..., promote=<movie identity> }
 -- query is lowercased/cleaned (for the TMDB search); display is title-cased (for
 -- the offline fallback card); TMDB's own title replaces display once fetched.
+--
+-- "unknown" is returned when the path carries NO confident content-type signal
+-- (not under a Movies/Films or TV folder, and no SxxEyy/NxNN marker). We refuse
+-- to guess a type in that case: its display is the raw file name (unmangled, with
+-- extension) and it is NOT enriched. main.lua may still promote it to `promote`
+-- (its best-effort movie identity) when any image file (artwork, or a stray
+-- jpg/png) sits next to the media, since that marks a catalogued movie/TV item.
 
 local M = {}
 
@@ -98,12 +106,16 @@ function M.identify(path)
     local parent = path:match("([^/\\]+)[/\\][^/\\]+$")
     local s = strip_ext(fname):gsub("[%._]", " "):lower()
 
-    -- Library path hint (e.g. /zhd/TV vs /zhd/Movies).
+    -- Library path hints (e.g. /zhd/Movies vs /zhd/TV). A folder that names the
+    -- content type is a confident signal all on its own.
     local lpath = path:lower()
     local is_movie_path = lpath:find("/movies?/") ~= nil or lpath:find("/films?/") ~= nil
+    local is_tv_path = lpath:find("/tv/") ~= nil or lpath:find("/tv[ _%-]?shows?/") ~= nil
+        or lpath:find("/series/") ~= nil
 
     -- ---- TV: SxxExx is definitive (any path); NxNN is a fallback, and is
-    --         ignored under a Movies path so it can't misfire on a film. -----
+    --         ignored under a Movies path so it can't misfire on a film. A TV
+    --         folder alone is enough to classify (show-level, no S/E). --------
     local cut, season, episode = nil, nil, nil
     local i1, _, se, ep = s:find("s(%d%d?)e(%d%d?)")
     if i1 then
@@ -113,8 +125,8 @@ function M.identify(path)
         if a then cut, season, episode = a, s2, e2 end
     end
 
-    if cut then
-        local show = strip_noise(s:sub(1, cut - 1))
+    if cut or is_tv_path then
+        local show = strip_noise(cut and s:sub(1, cut - 1) or s)
         if show == "" and parent then
             show = strip_noise(parent:gsub("[%._]", " "):lower())
         end
@@ -129,7 +141,8 @@ function M.identify(path)
         }
     end
 
-    -- ---- Movie: title (year) ----------------------------------------------
+    -- ---- Movie: title (year). Built even when unconfident so main.lua can
+    --      promote an unknown card to it if artwork side-files turn up. --------
     local ypos, yval = find_year(s)
     local title
     if ypos then
@@ -146,13 +159,27 @@ function M.identify(path)
         title = strip_noise(pp and p:sub(1, pp - 1) or p)
     end
 
-    return {
+    local movie = {
         kind = "movie",
         query = title,
         display = titlecase(title),
         year = yval and tonumber(yval) or nil,
         cachekey = string.format("movie_%s_%s",
             (title:gsub("%s", "_")), yval or "na"),
+    }
+
+    -- A Movies/Films folder is a confident movie signal; return it outright.
+    if is_movie_path then return movie end
+
+    -- ---- Unknown: nothing confident about the type. Don't guess — surface the
+    --      raw file name (with extension) and let main.lua promote to `movie`
+    --      only if an image (artwork or any jpg/png) is found beside it. -------
+    return {
+        kind = "unknown",
+        query = title,                 -- best-effort, used only after promotion
+        display = fname,               -- the full file name, unmangled
+        cachekey = "file_" .. (fname:lower():gsub("[^%w%-_]", "_")),
+        promote = movie,
     }
 end
 

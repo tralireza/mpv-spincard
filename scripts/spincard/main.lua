@@ -240,6 +240,23 @@ local function count_season_episodes(path, season)
     return n > 0 and n or nil
 end
 
+-- Any JPG/PNG image sitting next to the media? Artwork (or any stray image)
+-- marks the folder as a catalogued movie/TV item, which makes it a legitimate
+-- remote-lookup candidate. A bare video with NO image beside it stays "unknown"
+-- (raw file name, no type guess, no TMDB query).
+local IMG_EXT = { jpg = true, jpeg = true, png = true }
+local function dir_has_image(path)
+    local dir = path:match("^(.*)/[^/]+$")
+    if not dir then return false end
+    local files = utils.readdir(dir, "files")
+    if not files then return false end
+    for _, f in ipairs(files) do
+        local ext = f:match("%.([%a]+)$")
+        if ext and IMG_EXT[ext:lower()] then return true end
+    end
+    return false
+end
+
 -- Poster image: decode a local jpg -> BGRA (ffmpeg), draw with overlay-add ---
 
 local poster = {
@@ -1027,6 +1044,83 @@ local function text_w(s, fs)
     return w * fs
 end
 
+-- Split a UTF-8 string into a list of whole characters (multibyte-safe), so we
+-- never break in the middle of a glyph when wrapping.
+local function utf8_chars(s)
+    local t, i, n = {}, 1, #s
+    while i <= n do
+        local b = s:byte(i)
+        local len = (b < 0x80 and 1) or (b < 0xE0 and 2) or (b < 0xF0 and 3) or 4
+        t[#t + 1] = s:sub(i, i + len - 1)
+        i = i + len
+    end
+    return t
+end
+
+-- Pixel-aware wrap: break `text` into at most `maxlines` lines that each fit
+-- `maxw` virtual px at font size `fs` (measured via text_w). Unlike wrap(), this
+-- breaks WITHIN a token, so a space-less filename (dot/underscore separated)
+-- still wraps. Prefers a break just after a separator ( . _ - / ,); hard-breaks
+-- an over-long run; ellipsizes when content overflows maxlines.
+local WRAP_SEP = { [" "] = true, ["."] = true, ["_"] = true,
+    ["-"] = true, ["/"] = true, [","] = true }
+local function wrap_px(text, maxw, fs, maxlines)
+    local chars = utf8_chars(text)
+    local lines, line, lastsep = {}, {}, nil -- lastsep: index in `line` after a separator
+    local truncated = false
+    local function scan_sep() -- recompute lastsep over the current `line`
+        lastsep = nil
+        for i = 1, #line do if WRAP_SEP[line[i]] then lastsep = i end end
+    end
+    for idx, ch in ipairs(chars) do
+        line[#line + 1] = ch
+        if WRAP_SEP[ch] then lastsep = #line end
+        if #line > 1 and text_w(table.concat(line), fs) > maxw then
+            local cut = (lastsep and lastsep < #line) and lastsep or (#line - 1)
+            local head, rest = {}, {}
+            for i = 1, cut do head[i] = line[i] end
+            for i = cut + 1, #line do rest[#rest + 1] = line[i] end
+            lines[#lines + 1] = table.concat(head)
+            line = rest
+            scan_sep()
+            if #lines >= maxlines then
+                truncated = (idx < #chars) or (#line > 0)
+                break
+            end
+        end
+    end
+    if not truncated and #line > 0 then lines[#lines + 1] = table.concat(line) end
+    if truncated and #lines > 0 then
+        lines[#lines] = (lines[#lines]:gsub("[%s%.]+$", "")) .. "\226\128\166" -- …
+    end
+    return lines
+end
+
+-- Single-line fit: return `text` unchanged if it fits `maxw` at `fs`; else keep
+-- the leading portion that fits and append an ellipsis. The cut snaps back to the
+-- last separator ( . _ - / ,) when one is close by, so we end on a word boundary
+-- rather than slicing mid-token; a separator-less run is hard-cut. Used for the
+-- "unknown" card's raw file name, where wrapping a long dotted name reads poorly.
+local ELLIPSIS = "\226\128\166" -- …
+local function ellipsize_px(text, maxw, fs)
+    if text_w(text, fs) <= maxw then return text end
+    local chars = utf8_chars(text)
+    local line, lastsep = {}, nil
+    for _, ch in ipairs(chars) do
+        line[#line + 1] = ch
+        if WRAP_SEP[ch] then lastsep = #line end
+        if text_w(table.concat(line) .. ELLIPSIS, fs) > maxw then
+            line[#line] = nil -- drop the char that pushed it over the edge
+            if lastsep and lastsep <= #line
+                and (#line - lastsep) <= math.max(4, math.floor(#line * 0.33)) then
+                for i = #line, lastsep, -1 do line[i] = nil end -- snap to the boundary
+            end
+            break
+        end
+    end
+    return (table.concat(line):gsub("[%s._/,%-]+$", "")) .. ELLIPSIS -- trim trailing seps
+end
+
 -- Display fraction 0..1 for the bar fill (rough ranges — lit count only). Signal
 -- dBm fills a 50 dB window whose top is the tuner's configured max (signal_dbm_max,
 -- default the observed DS3000 ceiling); % maps directly; SNR dB ~ 0..20.
@@ -1229,7 +1323,18 @@ local function build_card(c)
     else
         local head = c.title or "Unknown"
         if c.year and c.year ~= "" then head = head .. "  (" .. c.year .. ")" end
-        line(head, 38, "FFFFFF", true)
+        -- Fit the heading to the card: keep the big font when it fits on one line,
+        -- otherwise drop to a smaller size. The "unknown" card's raw file name is
+        -- kept to ONE line, tail-ellipsised at a separator (wrapping a long dotted
+        -- name reads poorly); a real movie/TV title wraps instead, so no meaningful
+        -- words are hidden.
+        local hfs = 38
+        if text_w(head, hfs) > innerw then hfs = 28 end
+        if c.kind == "unknown" then
+            line(ellipsize_px(head, innerw, hfs), hfs, "FFFFFF", true)
+        else
+            for _, hl in ipairs(wrap_px(head, innerw, hfs, 3)) do line(hl, hfs, "FFFFFF", true) end
+        end
     end
 
     -- tagline (italic)
@@ -1563,9 +1668,24 @@ local function on_file_loaded()
 
     local id = identify(path)
     local poster_path = find_poster(path, id)
-    local ep_total = (id.kind == "tv") and count_season_episodes(path, id.season) or nil
     local logo_path = opts.show_logo and find_clearlogo(path, id) or nil
     local disc_path = opts.show_disc and find_disc(path, id) or nil
+    local fanart_path = opts.show_fanart and find_fanart(path, id) or nil
+    local banner_path = opts.show_banner and find_banner(path, id) or nil
+
+    -- Confidence promotion: identify() returns kind="unknown" when the path
+    -- carries no content-type signal (no Movies/Films or TV folder, no SxxEyy).
+    -- Any image (artwork or a stray jpg/png) beside the media marks it as a
+    -- catalogued movie/TV item, so promote the unknown to its best-effort movie
+    -- identity and let TMDB enrich it. Only a bare video with NO image alongside
+    -- stays a raw-filename card (no type guess, no remote query). The poster/movie
+    -- candidate sets are kind-independent, so no re-scan is needed after promotion.
+    if id.kind == "unknown" and id.promote
+        and (poster_path or logo_path or disc_path or fanart_path or banner_path
+            or dir_has_image(path)) then
+        id = id.promote
+    end
+    local ep_total = (id.kind == "tv") and count_season_episodes(path, id.season) or nil
 
     local function merged(m)
         local c = {}
@@ -1593,8 +1713,8 @@ local function on_file_loaded()
             season = id.season, episode = id.episode, source = "file",
         })
         if cached then cur_card.rating_src = "TMDB" end
-        do_tmdb = (not cached) and opts.enrich and opts.api_key ~= ""
-        msg.verbose(string.format("identified %s: '%s'%s%s", id.kind, id.query or "",
+        do_tmdb = (not cached) and opts.enrich and opts.api_key ~= "" and id.kind ~= "unknown"
+        msg.verbose(string.format("identified %s: '%s'%s%s", id.kind, id.query or id.display or "",
             id.season and string.format(" S%02dE%02d", id.season, id.episode) or "",
             poster_path and " [poster]" or ""))
     end
@@ -1603,7 +1723,8 @@ local function on_file_loaded()
     -- (overriding the source rating), and refetch on load when missing/stale.
     -- do_tmdb already returns a rating, so only fetch rating-only when it won't.
     local do_rating = false
-    if opts.enrich and opts.api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0 then
+    if opts.enrich and opts.api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0
+        and id.kind ~= "unknown" then
         local rv, rt = rating_get(id.cachekey)
         if rv then cur_card.rating, cur_card.rating_src = rv, "TMDB" end
         if not do_tmdb and rating_stale(rt) then do_rating = true end
@@ -1624,7 +1745,6 @@ local function on_file_loaded()
 
     -- Fanart backdrop: decode the dimmed jpg (once per fanart), show when ready.
     fanart_hide()
-    local fanart_path = opts.show_fanart and find_fanart(path, id) or nil
     if fanart_path then
         if not (fanart.ready and fanart.src == fanart_path) then
             fanart.ready = false
@@ -1638,7 +1758,6 @@ local function on_file_loaded()
 
     -- Banner: decode the wide title jpg (once per banner), show when ready.
     banner_hide()
-    local banner_path = opts.show_banner and find_banner(path, id) or nil
     if banner_path then
         if not (banner.ready and banner.src == banner_path) then
             banner.ready = false
