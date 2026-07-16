@@ -38,7 +38,8 @@ Online lookup (TMDB) is optional and off unless you add a key.
   **rating refresh** from TMDB for any card — rating is treated as dynamic, so
   even a local `.nfo` card gets a live rating (both need an API key).
 - Bottom-anchored card that grows upward; shows only for real video (not
-  images/audio); toggle key; auto-hide; colour-coded star rating; pill badges.
+  images/audio); toggle key; auto-hide; colour-coded star rating; and a row of
+  **tier-coloured pill badges** (see [Badges](#badges)).
 
 ## Requirements
 
@@ -138,6 +139,48 @@ The channel is resolved from the URL's `channelid` via Tvheadend's own playlist
 channel name (mpv's `media-title`). Only the EPG is read — no artwork or TMDB
 lookups for live TV. If your server needs auth, embed it in the URL
 (`http://user:pass@host:9981`).
+
+## Badges
+
+![Sample tech badge row — 4K · HDR10 in gold, HEVC · EAC3 · 5.1 in green, 23.976FPS in grey](docs/screenshots/badges.png)
+
+The card's tech line is a row of **pill badges** summarising the stream. The six
+file-detail pills are **tier-coloured** — the colour tells you how good each spec
+is at a glance:
+
+```
+Tier   │ Meaning       │ Examples
+───────┼───────────────┼────────────────────────────────────
+gold   │ premium       │ 4K · HDR10 · TrueHD/FLAC · 7.1
+green  │ good / modern │ 1080p · HEVC/AV1 · EAC3/AAC/DTS · 5.1
+grey   │ standard      │ 720p · H264 · AC3 · Stereo · frame rate
+dim    │ legacy / low  │ SD · MPEG2/VC1 · MP3 · Mono
+```
+
+The badges, and how each value maps to a tier:
+
+```
+Badge        │ Values → tier
+─────────────┼──────────────────────────────────────────────────────────
+Resolution   │ 4K(gold) · 1080p(green) · 720p(grey) · SD(dim)
+HDR          │ HDR10 · HLG — always gold
+Video codec  │ HEVC/AV1/VP9(green) · H264(grey) · MPEG2/VC1/WMV3(dim)
+Audio codec  │ TrueHD/FLAC/ALAC(gold) · EAC3/AAC/Opus/DTS(green) ·
+             │ AC3/PCM(grey) · MP3/MP2/WMA(dim)
+Channels     │ 7.1(gold) · 5.1(green) · Stereo(grey) · Mono(dim)
+Frame rate   │ e.g. 24FPS · 23.976FPS · 50FPS — grey
+```
+
+An unrecognised codec defaults to **grey**, never dim — a codec newer than the
+list won't be mislabelled as legacy.
+
+Two more pill sets carry **fixed** colours (identity/category, not quality):
+
+```
+TMDB pill    │ on the ★ rating row when the rating came from TMDB (TMDB blue)
+Live-TV mux  │ delivery system (DVB-S2…) + modulation (8PSK…) in card gold;
+             │ polarisation V/H in blue/violet
+```
 
 ## How it works
 

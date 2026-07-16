@@ -1014,6 +1014,55 @@ local function res_label(w)
     return "SD"
 end
 
+-- Tech-pill quality tiers → {bg, fg} (ASS BGR). Colour encodes how good a spec
+-- is at a glance: gold = premium, green = good, grey = standard, dim = legacy.
+local PILL_TIER = {
+    gold = { "18C5F5", "000000" }, -- premium  (matches the HDR pill / IMDb gold)
+    good = { "78C878", "000000" }, -- good     (the card's quality-green)
+    std  = { "3A3A3A", "FFFFFF" }, -- standard (the old flat pill)
+    dim  = { "2A2A2A", "A0A0A0" }, -- legacy/low
+}
+
+-- Exact-match tiers for the enumerable specs (values come straight from
+-- res_label / chan_label, so the keys are the only strings they can produce).
+local RES_TIER  = { ["4K"] = "gold", ["1080p"] = "good", ["720p"] = "std", SD = "dim" }
+local CHAN_TIER = { ["7.1"] = "gold", ["5.1"] = "good", Stereo = "std", Mono = "dim" }
+
+-- Codec tiers keyed by the uppercased mpv codec token; unknowns fall back to
+-- "std" (never dim — an unrecognised codec is likely just newer than this list).
+local VCODEC_TIER = {
+    HEVC = "good", H265 = "good", AV1 = "good", VP9 = "good",
+    H264 = "std", AVC = "std", VP8 = "std",
+    MPEG2VIDEO = "dim", MPEG2 = "dim", MPEG1VIDEO = "dim", VC1 = "dim",
+    MPEG4 = "dim", MSMPEG4V3 = "dim", WMV3 = "dim",
+}
+local ACODEC_TIER = {
+    TRUEHD = "gold", MLP = "gold", FLAC = "gold", ALAC = "gold", DTSHD = "gold",
+    EAC3 = "good", AAC = "good", OPUS = "good", DTS = "good", VORBIS = "good",
+    AC3 = "std", -- PCM* handled by prefix below
+    MP3 = "dim", MP2 = "dim", WMAV1 = "dim", WMAV2 = "dim",
+}
+
+-- kind + value → tier name. Kinds: res, chan, hdr, vcodec, acodec, fps.
+local function pill_tier(kind, v)
+    if not v then return "std" end
+    if kind == "res"    then return RES_TIER[v] or "std" end
+    if kind == "chan"   then return CHAN_TIER[v] or "std" end
+    if kind == "hdr"    then return "gold" end
+    if kind == "vcodec" then return VCODEC_TIER[v] or "std" end
+    if kind == "acodec" then
+        if v:match("^PCM") then return "std" end
+        return ACODEC_TIER[v] or "std"
+    end
+    return "std" -- fps + anything else: neutral (informational, not a quality tier)
+end
+
+-- kind + value → (bg, fg) ASS BGR colours for a tech pill.
+local function pill_colors(kind, v)
+    local c = PILL_TIER[pill_tier(kind, v)] or PILL_TIER.std
+    return c[1], c[2]
+end
+
 -- Format a scaled tuner metric: "72%" (relative) or "-42.9 dBm" / "12.3 dB".
 local function fmt_metric(v, unit)
     if unit == "%" then return string.format("%d%%", math.floor(v + 0.5)) end
@@ -1419,14 +1468,20 @@ local function build_card(c)
     if opts.show_tech then
         local tt = gather_tech()
 
-        -- pill badges: resolution · HDR · codec · channels · fps
+        -- pill badges: resolution · HDR · video codec · audio codec · channels ·
+        -- fps — each tier-coloured (gold/green/grey/dim) by pill_colors().
         local pills = {}
-        local rl = res_label(tt.vwidth)
-        if rl then pills[#pills + 1] = { t = rl, bg = "3A3A3A", fg = "FFFFFF" } end
-        if tt.hdr then pills[#pills + 1] = { t = tt.hdr, bg = "18C5F5", fg = "000000" } end
-        if tt.vcodec then pills[#pills + 1] = { t = tt.vcodec, bg = "3A3A3A", fg = "FFFFFF" } end
-        if tt.achan then pills[#pills + 1] = { t = tt.achan, bg = "3A3A3A", fg = "FFFFFF" } end
-        if tt.fps then pills[#pills + 1] = { t = tt.fps .. "fps", bg = "3A3A3A", fg = "FFFFFF" } end
+        local function add(kind, text)
+            if not text then return end
+            local bg, fg = pill_colors(kind, text)
+            pills[#pills + 1] = { t = text, bg = bg, fg = fg }
+        end
+        add("res", res_label(tt.vwidth))
+        add("hdr", tt.hdr)
+        add("vcodec", tt.vcodec)
+        add("acodec", tt.acodec)
+        add("chan", tt.achan)
+        add("fps", tt.fps and (tt.fps .. "FPS") or nil) -- e.g. "24FPS" / "23.976FPS" / "50FPS"
         if #pills > 0 then
             cy = cy + 8
             local ph, pfs, ppadx, pgap, charw = 30, 18, 12, 8, 18 * 0.62
@@ -1601,12 +1656,15 @@ gather_tech = function()
     t.chapters = mp.get_property_number("chapters")
 
     -- Audio / subtitle languages (deduped by language, in order).
-    local a_order, a_set, sel_lang, sel_ch = {}, {}, nil, nil
+    local a_order, a_set, sel_lang, sel_ch, sel_codec = {}, {}, nil, nil, nil
     local s_order, s_set, s_forced = {}, {}, {}
     for _, tr in ipairs(mp.get_property_native("track-list") or {}) do
         if tr.type == "audio" then
             local L = (tr.lang or "und"):upper()
-            if tr.selected then sel_lang, sel_ch = L, chan_label(tr["demux-channel-count"]) end
+            if tr.selected then
+                sel_lang, sel_ch = L, chan_label(tr["demux-channel-count"])
+                sel_codec = tr.codec and tr.codec:upper() or nil
+            end
             if not a_set[L] then a_set[L] = true; a_order[#a_order + 1] = L end
         elseif tr.type == "sub" then
             local L = (tr.lang or "und"):upper()
@@ -1629,10 +1687,10 @@ gather_tech = function()
         return table.concat(o, ", ")
     end
     t.audio, t.subs = join(a, 4), join(s, 6)
-    t.achan = sel_ch
+    t.achan, t.acodec = sel_ch, sel_codec
 
-    msg.verbose(string.format("tech: %s %s %s %s | A:%s S:%s | chapters:%s %s",
-        t.vcodec or "-", t.hdr or "-", t.fps or "-", t.reso or "-",
+    msg.verbose(string.format("tech: %s/%s %s %s %s | A:%s S:%s | chapters:%s %s",
+        t.vcodec or "-", t.acodec or "-", t.hdr or "-", t.fps or "-", t.reso or "-",
         t.audio or "-", t.subs or "-", tostring(t.chapters or 0), t.size or "-"))
     return t
 end
