@@ -50,6 +50,7 @@ local opts = {
     banner_height  = 0.10,  -- banner height as a fraction of the video height
     show_logo      = true,  -- clearlogo.png title art, top-left (transparent PNG)
     logo_height    = 0.12,  -- logo height as a fraction of the video height
+    logo_autocrop  = true,  -- crop the clearlogo's transparent margins so its slot maps to real artwork
     show_disc      = true,  -- 3/4 disc.png nestled at the card's top-left corner
     disc_size      = 0.22,  -- disc diameter as a fraction of the video height
     disc_spin      = true,  -- spin the disc while the card is showing
@@ -524,6 +525,7 @@ local clearlogo = {
     w = 0, h = 0, ready = false, shown = false, src = nil,
 }
 local LOGO_H = 240
+local LOGO_GAP = 6      -- gap (virtual px) between the clearlogo band and the first text row
 
 local disc = {
     id = 5,
@@ -535,8 +537,12 @@ local disc = {
 local DISC_H = 256      -- decode height (square); modest for mpv 0.41 offsets
 
 -- Decode a transparent PNG to premultiplied BGRA (overlay-add wants premult).
-local function png_decode(img, srcpath, height, cb, extra_vf)
-    local vf = "scale=-2:" .. height .. ",format=rgba"
+-- pre_vf runs BEFORE scale (native px, e.g. crop=W:H:X:Y); extra_vf runs after
+-- scale, before premultiply (e.g. an alpha mask).
+local function png_decode(img, srcpath, height, cb, extra_vf, pre_vf)
+    local vf = ""
+    if pre_vf then vf = pre_vf .. "," end -- native-px crop, before scale
+    vf = vf .. "scale=-2:" .. height .. ",format=rgba"
     if extra_vf then vf = vf .. "," .. extra_vf end -- e.g. alpha mask, before premult
     vf = vf .. ",premultiply=inplace=1"
     mp.command_native_async({
@@ -572,6 +578,33 @@ local function find_clearlogo(path, id)
     return find_art(path, id, "clearlogo.png") or find_art(path, id, "logo.png")
 end
 local function find_disc(path, id) return find_art(path, id, "disc.png") end
+
+-- Decode the clearlogo cropped to its opaque bounding box, so the reserved title
+-- slot maps to real artwork rather than the PNG's (variable) transparent margins.
+-- Pass 1 runs cropdetect over the ALPHA plane (alphaextract) to find the bbox;
+-- pass 2 decodes with that crop applied before scale (native-px coords). If
+-- detection yields nothing (older ffmpeg, or a logo whose shadow bleeds to the
+-- edge) it falls back to a plain full-frame decode — never breaks the logo.
+--   limit=0 : trim only fully-transparent rows/cols (any opacity is kept)
+--   skip=0  : cropdetect skips the first 2 frames by default → none for a still,
+--             so force skip=0 and feed a few looped frames as belt-and-suspenders
+local function clearlogo_decode(srcpath, cb)
+    if not opts.logo_autocrop then return png_decode(clearlogo, srcpath, LOGO_H, cb) end
+    mp.command_native_async({
+        name = "subprocess", playback_only = false, capture_stderr = true,
+        args = { "ffmpeg", "-y", "-loglevel", "info", "-loop", "1", "-i", srcpath,
+            "-vf", "format=rgba,alphaextract,cropdetect=limit=0:round=2:reset=1:skip=0",
+            "-frames:v", "3", "-f", "null", "-" },
+    }, function(ok, res)
+        local crop
+        if ok and res and res.stderr then
+            for w, h, ox, oy in res.stderr:gmatch("crop=(%d+):(%d+):(%d+):(%d+)") do
+                crop = string.format("crop=%s:%s:%s:%s", w, h, ox, oy) -- keep the last
+            end
+        end
+        png_decode(clearlogo, srcpath, LOGO_H, cb, nil, crop)
+    end)
+end
 
 local function img_remove(img)
     if img.shown then mp.command_native({ "overlay-remove", img.id }); img.shown = false end
@@ -1367,7 +1400,7 @@ local function build_card(c)
             if w_at > 812 then band = math.floor(812 * clearlogo.h / clearlogo.w) end
         end
         logo_rect = { x = x + pad, y = cy, h = band }
-        cy = cy + band - 10 -- pull the year up into the logo's lower margin
+        cy = cy + band + LOGO_GAP -- clear the logo band (autocrop makes band == artwork)
         if c.year and c.year ~= "" then line(tostring(c.year), 20, "B4B4B4") end
     else
         local head = c.title or "Unknown"
@@ -1761,6 +1794,7 @@ local function on_file_loaded()
     if localc then
         localc.season = localc.season or id.season
         localc.episode = localc.episode or id.episode
+        localc.title = localc.title or id.display -- episode .nfo without <showtitle>: use the path-derived show name
         cur_card = merged(localc)
         msg.verbose("local .nfo: '" .. tostring(localc.title) .. "'"
             .. (poster_path and " [poster]" or ""))
@@ -1832,7 +1866,7 @@ local function on_file_loaded()
     if logo_path then
         if not (clearlogo.ready and clearlogo.src == logo_path) then
             clearlogo.ready = false
-            png_decode(clearlogo, logo_path, LOGO_H, function(ok)
+            clearlogo_decode(logo_path, function(ok)
                 if ok and gen == current_gen and visible then render() end
             end)
         end
