@@ -39,6 +39,7 @@ local opts = {
     signal_dbm_max = -40.6, -- live TV: dBm that fills the signal meter (tuner's max; meter spans 50 dB below it)
     show_poster   = true,  -- render the local poster image (needs ffmpeg)
     poster_height = 0.42,  -- poster height as a fraction of the video height
+    poster_max_width = 0.30, -- cap poster width as a fraction of OSD width — reins in wide 16:9 TV episode thumbs so they clear the card (0 = no cap)
     poster_margin = 0.02,  -- gap from the top-right corner (fraction of height; 0 = flush)
     show_tech     = true,  -- local file details (codec/HDR/audio/subs/chapters/…)
     show_fanart    = true, -- dimmed fanart.jpg backdrop (needs ffmpeg)
@@ -299,8 +300,12 @@ local function poster_show()
     local ow, oh = mp.get_osd_size()
     if not ow or ow == 0 or not oh or oh == 0 then return end
     local dh = math.floor(oh * opts.poster_height)
-    local scale = dh / poster.h
-    local dw = math.floor(poster.w * scale)
+    local dw = math.floor(poster.w * (dh / poster.h))
+    local max_dw = math.floor(ow * (tonumber(opts.poster_max_width) or 0)) -- 0 = no cap
+    if max_dw > 0 and dw > max_dw then       -- landscape episode thumbs blow out wide
+        dw = max_dw
+        dh = math.floor(poster.h * (dw / poster.w)) -- keep aspect ratio
+    end
     local margin = math.floor(oh * opts.poster_margin)
     mp.command_native({
         name = "overlay-add", id = poster.id,
