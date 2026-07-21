@@ -41,6 +41,24 @@ Online lookup (TMDB) is optional and off unless you add a key.
   images/audio); toggle key; auto-hide; colour-coded star rating; and a row of
   **tier-coloured pill badges** (see [Badges](#badges)).
 
+## Layout
+
+Where each piece is drawn on the mpv output. Every position is a fraction of the
+**live output size**, so the same layout holds at 1080p, 4K, or in a resized window:
+
+![spincard layout on the mpv output: full-frame dimmed fanart backdrop, poster top-right, optional banner top-left, and the card bottom-left with a spinning 3/4 disc on its corner](docs/layout-desktop.svg)
+
+And the card's own top-to-bottom anatomy (shown as a fully-populated **movie** card
+— a TV episode or a TMDB-only card renders fewer rows):
+
+![spincard card anatomy: clearlogo title slot, year, tagline, colour-coded star rating with a TMDB source pill, genres, plot, director, cast, tier-coloured tech pills, and a live progress bar, with the 3/4 disc on the top-left corner](docs/layout-card.svg)
+
+mpv draws image overlays **above** the ASS text, so the layers stack back-to-front
+as `fanart → poster → banner → clearlogo → disc`. That's why the fanart is dimmed
+(it tints the card) while the poster and disc are kept clear of the text. The
+poster's width is capped (`poster_max_width`) so a wide TV episode thumbnail can't
+spill over the card's top-right corner.
+
 ## Requirements
 
 - **mpv** built with Lua (LuaJIT or Lua 5.1/5.2).
