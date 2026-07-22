@@ -49,15 +49,19 @@ local function all_tags(text, name)
     return t
 end
 
--- top few actor names (each <actor> block's first <name>)
+-- top few actors as { name, role } (each <actor> block's <name>/<role>); role is
+-- the character and may be nil. Order follows document order (Kodi writes <order>).
 local function cast(text, limit)
-    local names = {}
+    local out = {}
     for block in text:gmatch("<actor>(.-)</actor>") do
         local n = block:match("<name>(.-)</name>")
-        if n then names[#names + 1] = unescape(n) end
-        if #names >= (limit or 4) then break end
+        if n then
+            local r = block:match("<role>(.-)</role>")
+            out[#out + 1] = { name = unescape(n), role = r and unescape(r) or nil }
+        end
+        if #out >= (limit or 4) then break end
     end
-    return names
+    return out
 end
 
 -- Prefer the default-marked rating (usually IMDb); else the bare <rating>.

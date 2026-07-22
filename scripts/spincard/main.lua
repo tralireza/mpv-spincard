@@ -57,11 +57,16 @@ local opts = {
     disc_spin      = true,  -- spin the disc while the card is showing
     disc_spin_secs = 2.5,   -- seconds per full rotation (higher = slower)
     disc_spin_frames = 96,  -- rotation frames (more = smoother; larger temp file)
+    cast_max      = 5,      -- max cast entries shown on the card (packed onto ≤2 lines)
+    nfo_supplement = true,  -- fill a local .nfo's MISSING fields (cast/genres/…) from TMDB (needs api_key)
+    region        = "",     -- certification region (e.g. GB, US); "" => derive from `language`
 }
 options.read_options(opts, "spincard")
 
 local RES_X, RES_Y = 1280, 720
 local TMDB = "https://api.themoviedb.org/3"
+local CARD_VER = 2 -- disk-card schema; a cached card below this is refetched once
+                   -- so pre-v2 caches (no cast/genres/…) auto-upgrade on next play
 
 local overlay = mp.create_osd_overlay("ass-events")
 overlay.res_x = RES_X
@@ -179,6 +184,35 @@ end
 local function rating_stale(t)
     local ttl = tonumber(opts.rating_ttl) or 0
     return (not t) or (os.time() - t) >= ttl
+end
+
+-- Supplement: fields a local .nfo may lack that TMDB can supply (rating is a
+-- separate dynamic property, so it is NOT in this list). Cached under a distinct
+-- "extra/<key>" entry so the local-first .nfo body on disk is never touched.
+local SUPP_FIELDS = { "cast", "genres", "studio", "tagline", "director", "runtime", "mpaa" }
+
+local function is_empty(v)
+    return v == nil or v == "" or (type(v) == "table" and #v == 0)
+end
+local function nfo_missing(c)
+    for _, f in ipairs(SUPP_FIELDS) do if is_empty(c[f]) then return true end end
+    return false
+end
+-- Fill dst's missing supplementable fields from src; never overwrite a value dst
+-- already has (respects local-first — the .nfo stays authoritative).
+local function fill_missing(dst, src)
+    for _, f in ipairs(SUPP_FIELDS) do
+        if is_empty(dst[f]) and not is_empty(src[f]) then dst[f] = src[f] end
+    end
+end
+-- Extract from a fetched card/details only the supplementable fields that `localc`
+-- lacked — this is what gets cached under extra/<key>.
+local function pick_supplement(src, localc)
+    local extra = {}
+    for _, f in ipairs(SUPP_FIELDS) do
+        if is_empty(localc[f]) and not is_empty(src[f]) then extra[f] = src[f] end
+    end
+    return extra
 end
 
 -- Local sidecars (.nfo metadata + poster image) -----------------------------
@@ -715,7 +749,99 @@ local function curl_json(url, cb)
     end)
 end
 
--- id -> metadata card (no local/tech fields; those are merged at show time)
+-- Certification region: explicit `region` opt, else the country from `language`
+-- (en-US -> US, en-GB -> GB); default US.
+local function tmdb_region()
+    local r = opts.region
+    if r and r ~= "" then return r:upper() end
+    return (tostring(opts.language):match("[-_](%a%a)$") or "US"):upper()
+end
+
+-- Map a TMDB details+credits (+release_dates/content_ratings) object to the extra
+-- card fields build_card can render: {genres, runtime, tagline, studio, director,
+-- cast={name,role}, mpaa}. Pure; a missing sub-object just yields no key.
+local function parse_details(kind, d)
+    local out = {}
+    if not d then return out end
+    if type(d.genres) == "table" then
+        local g = {}
+        for _, x in ipairs(d.genres) do if x.name and x.name ~= "" then g[#g + 1] = x.name end end
+        if #g > 0 then out.genres = g end
+    end
+    if d.tagline and d.tagline ~= "" then out.tagline = d.tagline end
+    if kind == "tv" then
+        out.runtime = tonumber(d.episode_run_time and d.episode_run_time[1])
+        if type(d.networks) == "table" and d.networks[1] then out.studio = d.networks[1].name end
+    else
+        out.runtime = tonumber(d.runtime)
+        if type(d.production_companies) == "table" and d.production_companies[1] then
+            out.studio = d.production_companies[1].name
+        end
+    end
+    local cr = d.credits
+    if type(cr) == "table" then
+        if type(cr.cast) == "table" and #cr.cast > 0 then
+            local cast = {}
+            for _, p in ipairs(cr.cast) do cast[#cast + 1] = p end
+            table.sort(cast, function(a, b) return (a.order or 999) < (b.order or 999) end)
+            local out_cast = {}
+            for _, p in ipairs(cast) do
+                if p.name and p.name ~= "" then
+                    out_cast[#out_cast + 1] =
+                        { name = p.name, role = (p.character and p.character ~= "") and p.character or nil }
+                end
+            end
+            if #out_cast > 0 then out.cast = out_cast end
+        end
+        if type(cr.crew) == "table" then
+            for _, p in ipairs(cr.crew) do
+                if p.job == "Director" and p.name then out.director = p.name; break end
+            end
+        end
+    end
+    local region = tmdb_region()
+    if kind == "movie" and type(d.release_dates) == "table" and type(d.release_dates.results) == "table" then
+        for _, rr in ipairs(d.release_dates.results) do
+            if rr.iso_3166_1 == region and type(rr.release_dates) == "table" then
+                for _, rd in ipairs(rr.release_dates) do
+                    if rd.certification and rd.certification ~= "" then out.mpaa = rd.certification; break end
+                end
+            end
+            if out.mpaa then break end
+        end
+    elseif kind == "tv" and type(d.content_ratings) == "table" and type(d.content_ratings.results) == "table" then
+        for _, rr in ipairs(d.content_ratings.results) do
+            if rr.iso_3166_1 == region and rr.rating and rr.rating ~= "" then out.mpaa = rr.rating; break end
+        end
+    end
+    return out
+end
+
+-- Overwrite card fields with the non-nil fields of `extra` (search card -> rich).
+local function overlay_fields(card, extra)
+    for k, v in pairs(extra) do card[k] = v end
+end
+
+-- Details by TMDB id (no search) -> parse_details fields (+ rating). Used to
+-- supplement a local .nfo that carries a <uniqueid> tmdb id.
+local function tmdb_details(kind, tmdb_id, cb)
+    local lang = "&language=" .. urlencode(opts.language)
+    local path = (kind == "tv") and "tv" or "movie"
+    local append = (kind == "tv") and "credits,content_ratings" or "credits,release_dates"
+    local url = string.format("%s/%s/%s?api_key=%s%s&append_to_response=%s",
+        TMDB, path, tostring(tmdb_id), opts.api_key, lang, append)
+    curl_json(url, function(d)
+        if not d or d.success == false then return cb(nil) end
+        local out = parse_details(kind, d)
+        if d.vote_average and d.vote_average > 0 then out.rating = d.vote_average end
+        cb(out)
+    end)
+end
+
+-- id -> metadata card (no local/tech fields; those are merged at show time).
+-- A search hit gives the base card (title/year/rating/overview/poster); a
+-- follow-up details+credits call overlays genres/studio/cast/director/tagline/
+-- runtime/certification. A details failure keeps the base card intact.
 local function tmdb_fetch(id, cb)
     local lang = "&language=" .. urlencode(opts.language)
     if id.kind == "tv" then
@@ -730,21 +856,33 @@ local function tmdb_fetch(id, cb)
                 rating = r.vote_average, overview = r.overview,
                 poster = r.poster_path, season = id.season, episode = id.episode,
             }
-            if id.season and id.episode and r.id then
-                local eurl = string.format("%s/tv/%d/season/%d/episode/%d?api_key=%s%s",
-                    TMDB, r.id, id.season, id.episode, opts.api_key, lang)
-                curl_json(eurl, function(e)
-                    if e and e.name then
-                        card.episode_title = e.name
-                        if e.overview and e.overview ~= "" then card.overview = e.overview end
-                        if e.vote_average and e.vote_average > 0 then card.rating = e.vote_average end
-                        if e.air_date and e.air_date ~= "" then card.air_date = e.air_date end
-                    end
+            if not r.id then return cb(card) end
+            local durl = string.format("%s/tv/%d?api_key=%s%s&append_to_response=credits,content_ratings",
+                TMDB, r.id, opts.api_key, lang)
+            curl_json(durl, function(dd)
+                overlay_fields(card, parse_details("tv", dd))
+                if id.season and id.episode then
+                    local eurl = string.format("%s/tv/%d/season/%d/episode/%d?api_key=%s%s",
+                        TMDB, r.id, id.season, id.episode, opts.api_key, lang)
+                    curl_json(eurl, function(e)
+                        if e and e.name then
+                            card.episode_title = e.name
+                            if e.overview and e.overview ~= "" then card.overview = e.overview end
+                            if e.vote_average and e.vote_average > 0 then card.rating = e.vote_average end
+                            if e.air_date and e.air_date ~= "" then card.air_date = e.air_date end
+                            if type(e.runtime) == "number" and e.runtime > 0 then card.runtime = e.runtime end
+                            if type(e.crew) == "table" then -- episode director beats show-level
+                                for _, p in ipairs(e.crew) do
+                                    if p.job == "Director" and p.name then card.director = p.name; break end
+                                end
+                            end
+                        end
+                        cb(card)
+                    end)
+                else
                     cb(card)
-                end)
-            else
-                cb(card)
-            end
+                end
+            end)
         end)
     else
         local url = string.format("%s/search/movie?api_key=%s&query=%s%s",
@@ -753,11 +891,18 @@ local function tmdb_fetch(id, cb)
         curl_json(url, function(d)
             local r = d and d.results and d.results[1]
             if not r then return cb(nil) end
-            cb({
+            local card = {
                 kind = "movie", title = r.title, source = "TMDB",
                 year = (r.release_date or ""):sub(1, 4),
                 rating = r.vote_average, overview = r.overview, poster = r.poster_path,
-            })
+            }
+            if not r.id then return cb(card) end
+            local durl = string.format("%s/movie/%d?api_key=%s%s&append_to_response=credits,release_dates",
+                TMDB, r.id, opts.api_key, lang)
+            curl_json(durl, function(dd)
+                overlay_fields(card, parse_details("movie", dd))
+                cb(card)
+            end)
         end)
     end
 end
@@ -1427,12 +1572,29 @@ local function build_card(c)
     -- tagline (italic)
     if c.tagline and c.tagline ~= "" then line(c.tagline, 20, "A0A0A0", false, true) end
 
-    -- TV: SxxEyy · Episode Title
+    -- Two compact fields, inline vs own-line: credits (director/studio) go inline
+    -- (parens on the TV subline / on the movie meta line); genres get their own line
+    -- after the overview. (Genres and credits are swapped from the earlier layout.)
+    local function genres_str(cc)
+        local g = {}
+        for i = 1, math.min(3, #cc.genres) do g[i] = cc.genres[i] end
+        return table.concat(g, ", ")
+    end
+    local function credit_str(cc)
+        local cr = {}
+        if cc.director and cc.director ~= "" then cr[#cr + 1] = "Dir. " .. cc.director end
+        if cc.studio and cc.studio ~= "" then cr[#cr + 1] = cc.studio end
+        return table.concat(cr, "  \226\128\162  ")
+    end
+
+    -- TV: SxxEyy · Episode Title (Directed by … · Studio)
     if c.kind == "tv" and c.season and c.episode then
         local sub = string.format("S%02dE%02d", c.season, c.episode)
         if c.ep_total and c.ep_total > 0 then sub = sub .. string.format(" (/%d)", c.ep_total) end
         if c.episode_title and c.episode_title ~= "" then sub = sub .. "   " .. c.episode_title end
-        line(sub, 25, "00D7FF")
+        local cr = credit_str(c)
+        if cr ~= "" then sub = sub .. "  (" .. cr .. ")" end
+        line(ellipsize_px(sub, innerw, 25), 25, "00D7FF")
     end
 
     -- rating: colour-coded stars, plus a source pill (e.g. TMDB) right-aligned on
@@ -1461,14 +1623,8 @@ local function build_card(c)
     if aired and aired ~= "" then meta[#meta + 1] = "Aired " .. fmt_date(aired) end
     if c.runtime and tonumber(c.runtime) then meta[#meta + 1] = string.format("%d min", c.runtime) end
     if c.mpaa and c.mpaa ~= "" then meta[#meta + 1] = c.mpaa end
-    if #meta > 0 then line(table.concat(meta, "   \226\128\162   "), 21, "B4B4B4") end
-
-    -- genres (slightly larger + bold)
-    if c.genres and #c.genres > 0 then
-        local g = {}
-        for i = 1, math.min(3, #c.genres) do g[i] = c.genres[i] end
-        line(table.concat(g, "  \226\128\162  "), 24, "DCDCDC", true)
-    end
+    if c.kind ~= "tv" then local cr = credit_str(c); if cr ~= "" then meta[#meta + 1] = cr end end
+    if #meta > 0 then line(ellipsize_px(table.concat(meta, "   \226\128\162   "), innerw, 21), 21, "B4B4B4") end
 
     -- overview
     if c.overview and c.overview ~= "" then
@@ -1476,30 +1632,43 @@ local function build_card(c)
         for _, ln in ipairs(wrap(c.overview, 74, 3)) do line(ln, 22, "C8C8C8") end
     end
 
-    -- director / studio
-    local credit = {}
-    if c.director and c.director ~= "" then credit[#credit + 1] = "Directed by " .. c.director end
-    if c.studio and c.studio ~= "" then credit[#credit + 1] = c.studio end
-    if #credit > 0 then cy = cy + 4; line(table.concat(credit, "   \226\128\162   "), 19, "A0A0A0") end
+    -- genres on their own line (swapped with the credits, which are now inline)
+    if c.genres and #c.genres > 0 then cy = cy + 4; line(genres_str(c), 22, "DCDCDC", true) end
 
-    -- cast (amber, bold) — up to 5 names packed onto at most 2 lines
+    -- cast (amber, bold) — "Name (Role)" (role optional), comma-separated, packed
+    -- onto ≤2 lines. Entries may be {name, role} tables (TMDB / .nfo <role>) or
+    -- bare name strings (older caches); over-long entries are ellipsized to fit.
     if c.cast and #c.cast > 0 then
-        local names = {}
-        for i = 1, math.min(5, #c.cast) do names[#names + 1] = c.cast[i] end
-        cy = cy + 4
-        local budget, rows, cur = 58, {}, ""
-        for _, nm in ipairs(names) do
-            local piece = (cur == "") and nm or (cur .. ", " .. nm)
-            if #piece > budget and cur ~= "" then
-                rows[#rows + 1] = cur .. ","
-                cur = nm
-                if #rows >= 2 then break end
-            else
-                cur = piece
+        local fs, nmax = 22, math.max(1, tonumber(opts.cast_max) or 5)
+        local entries = {}
+        for i = 1, math.min(nmax, #c.cast) do
+            local e = c.cast[i]
+            local nm = (type(e) == "table") and e.name or e
+            local role = (type(e) == "table") and e.role or nil
+            if nm and nm ~= "" then
+                local s = (role and role ~= "") and (nm .. " (" .. role .. ")") or nm
+                entries[#entries + 1] = ellipsize_px(s, innerw, fs)
             end
         end
-        if cur ~= "" and #rows < 2 then rows[#rows + 1] = cur end
-        for _, r in ipairs(rows) do line(r, 22, "00D7FF", true) end
+        if #entries > 0 then
+            cy = cy + 4
+            local rows, cur = {}, ""
+            for _, s in ipairs(entries) do
+                local piece = (cur == "") and s or (cur .. ", " .. s)
+                if cur ~= "" and text_w(piece, fs) > innerw then
+                    rows[#rows + 1] = cur .. ","
+                    cur = s
+                    if #rows >= 2 then break end
+                else
+                    cur = piece
+                end
+            end
+            if cur ~= "" and #rows < 2 then rows[#rows + 1] = cur end
+            -- the last row must not end on a separator (a 5th entry that didn't
+            -- fit leaves the 2nd row with a trailing comma) — strip it.
+            if #rows > 0 then rows[#rows] = (rows[#rows]:gsub(",%s*$", "")) end
+            for _, r in ipairs(rows) do line(r, fs, "00D7FF", true) end
+        end
     end
 
     -- local file details — read live from mpv properties at render time
@@ -1537,18 +1706,12 @@ local function build_card(c)
             cy = cy + ph
         end
 
-        -- audio / subtitle languages
+        -- audio / subtitle languages (own full-width line; duration/chapters/size
+        -- moved to the very bottom line, below the progress bar)
         local as = {}
         if tt.audio then as[#as + 1] = "Audio: " .. tt.audio end
         if tt.subs then as[#as + 1] = "Subs: " .. tt.subs end
         if #as > 0 then cy = cy + 6; line(table.concat(as, "    "), 18, "8C8C8C") end
-
-        -- duration · chapters · size
-        local d = {}
-        if tt.dur then d[#d + 1] = tt.dur end
-        if tt.chapters and tt.chapters > 0 then d[#d + 1] = string.format("%d chapters", tt.chapters) end
-        if tt.size then d[#d + 1] = tt.size end
-        if #d > 0 then cy = cy + 4; line(table.concat(d, "  \226\128\162  "), 18, "8C8C8C") end
 
         -- live progress bar
         local pct = mp.get_property_number("percent-pos")
@@ -1572,6 +1735,13 @@ local function build_card(c)
             end
             line(info, 17, "A0A0A0")
         end
+
+        -- duration · chapters · size — the last line at the bottom of the card
+        local dl = {}
+        if tt.dur then dl[#dl + 1] = tt.dur end
+        if tt.chapters and tt.chapters > 0 then dl[#dl + 1] = string.format("%d chapters", tt.chapters) end
+        if tt.size then dl[#dl + 1] = tt.size end
+        if #dl > 0 then cy = cy + 6; line(table.concat(dl, "  \226\128\162  "), 18, "8C8C8C") end
     end
 
     end -- close the livetv / movie-tv content branch
@@ -1810,10 +1980,24 @@ local function on_file_loaded()
             season = id.season, episode = id.episode, source = "file",
         })
         if cached then cur_card.rating_src = "TMDB" end
-        do_tmdb = (not cached) and opts.enrich and opts.api_key ~= "" and id.kind ~= "unknown"
+        -- refetch when there's no cache, or the cache predates the current schema
+        -- (so old sparse cards pick up cast/genres/studio/… once).
+        local stale_cache = cached and (tonumber(cached._v) or 1) < CARD_VER
+        do_tmdb = (not cached or stale_cache)
+            and opts.enrich and opts.api_key ~= "" and id.kind ~= "unknown"
         msg.verbose(string.format("identified %s: '%s'%s%s", id.kind, id.query or id.display or "",
             id.season and string.format(" S%02dE%02d", id.season, id.episode) or "",
             poster_path and " [poster]" or ""))
+    end
+
+    -- Supplement a local .nfo that is MISSING fields (cast/genres/…) from TMDB:
+    -- fill-only (never overwrites the .nfo), cached under a separate extra/<key>.
+    -- ID-first (the .nfo's <uniqueid> tmdb id), else the same title/year search.
+    local do_supp = false
+    if localc and opts.enrich and opts.api_key ~= "" and id.kind ~= "unknown"
+        and opts.nfo_supplement and nfo_missing(localc) then
+        local extra = cache_get("extra/" .. id.cachekey)
+        if extra then fill_missing(cur_card, extra) else do_supp = true end
     end
 
     -- Rating is a dynamic property: show the freshest cached rating now
@@ -1899,6 +2083,7 @@ local function on_file_loaded()
     if do_tmdb then
         tmdb_fetch(id, function(card)
             if not card then return end
+            card._v = CARD_VER
             cache_put(id.cachekey, card)
             rating_put(id.cachekey, card.rating) -- seed the dynamic rating cache
             if gen ~= current_gen then return end
@@ -1906,17 +2091,45 @@ local function on_file_loaded()
             cur_card.rating_src = "TMDB"
             if visible then render() end
         end)
-    elseif do_rating then
-        -- rating-only refresh (local .nfo card, or a stale cache hit): update
-        -- just the rating, leaving the authoritative source card intact.
-        tmdb_fetch(id, function(card)
-            local r = card and tonumber(card.rating)
-            if not r or r <= 0 then return end
-            rating_put(id.cachekey, r)
-            if gen ~= current_gen then return end
-            cur_card.rating, cur_card.rating_src = r, "TMDB"
-            if visible then render() end
-        end)
+    else
+        if do_supp then
+            -- local .nfo present but missing fields: fetch, cache ONLY the gap
+            -- fields under extra/<key>, and fill-only into the card (never
+            -- overwriting authoritative .nfo values). When we also owe a rating
+            -- refresh, use the search path (episode-accurate rating + body in one
+            -- chain) and let it cover do_rating; otherwise prefer the precise
+            -- id-based details call.
+            local want_rating = do_rating
+            local finish = function(src)
+                if not src then return end
+                local extra = pick_supplement(src, localc)
+                cache_put("extra/" .. id.cachekey, extra) -- before the gen guard
+                local r = want_rating and tonumber(src.rating) or nil
+                if r and r > 0 then rating_put(id.cachekey, r) end
+                if gen ~= current_gen then return end
+                fill_missing(cur_card, extra)
+                if r and r > 0 then cur_card.rating, cur_card.rating_src = r, "TMDB" end
+                if visible then render() end
+            end
+            if localc.tmdb_id and not want_rating then
+                tmdb_details(localc.kind or id.kind, localc.tmdb_id, finish)
+            else
+                tmdb_fetch(id, finish)
+            end
+            do_rating = false -- the supplement fetch also handled the rating
+        end
+        if do_rating then
+            -- rating-only refresh (local .nfo card, or a stale cache hit): update
+            -- just the rating, leaving the authoritative source card intact.
+            tmdb_fetch(id, function(card)
+                local r = card and tonumber(card.rating)
+                if not r or r <= 0 then return end
+                rating_put(id.cachekey, r)
+                if gen ~= current_gen then return end
+                cur_card.rating, cur_card.rating_src = r, "TMDB"
+                if visible then render() end
+            end)
+        end
     end
 end
 
