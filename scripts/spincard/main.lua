@@ -57,7 +57,16 @@ local opts = {
     disc_spin      = true,  -- spin the disc while the card is showing
     disc_spin_secs = 2.5,   -- seconds per full rotation (higher = slower)
     disc_spin_frames = 96,  -- rotation frames (more = smoother; larger temp file)
-    cast_max      = 5,      -- max cast entries shown on the card (packed onto ≤2 lines)
+    cast_max      = 5,      -- max cast entries shown/cycled (also the scroll pool size)
+    cast_scroll   = false,  -- scroll the cast through a fixed grid (else pack ≤2 rows)
+    cast_scroll_secs = 2.5, -- seconds between cast scroll steps (0 = don't advance)
+    cast_lines    = 2,      -- cast grid rows when cast_scroll is on
+    cast_cols     = 2,      -- cast entries per row (2nd column starts at the card middle)
+    cast_fs       = 22,     -- cast font size
+    cast_bold     = true,   -- cast in bold
+    overview_scroll = false,-- scroll the synopsis through a fixed overview_lines window
+    overview_scroll_secs = 1,-- seconds between synopsis scroll steps (0 = don't advance)
+    overview_lines = 3,     -- synopsis viewport height (lines)
     nfo_supplement = true,  -- fill a local .nfo's MISSING fields (cast/genres/…) from TMDB (needs api_key)
     region        = "",     -- certification region (e.g. GB, US); "" => derive from `language`
 }
@@ -81,6 +90,8 @@ local signal_inflight = false -- guards overlapping polls (two chained curls per
 local logo_rect = nil    -- clearlogo slot in 1280x720 coords, set by build_card
 local card_rect = nil    -- card box rect in 1280x720 coords, set by build_card
 local anim_fade, refresh_timer = 1, nil -- anim_fade stays 1 (fades disabled)
+local cast_scroll_idx, cast_scroll_timer = 0, nil -- cast marquee window offset + timer
+local overview_scroll_idx, overview_scroll_timer = 0, nil -- synopsis marquee offset + timer
 local current_gen = 0
 local render, show, hide, toggle, gather_tech   -- forward declarations
 
@@ -1626,20 +1637,38 @@ local function build_card(c)
     if c.kind ~= "tv" then local cr = credit_str(c); if cr ~= "" then meta[#meta + 1] = cr end end
     if #meta > 0 then line(ellipsize_px(table.concat(meta, "   \226\128\162   "), innerw, 21), 21, "B4B4B4") end
 
-    -- overview
+    -- overview / synopsis. Default: wrapped to overview_lines, static. With
+    -- overview_scroll: a fixed overview_lines window over the FULL wrapped text,
+    -- advanced one line every overview_scroll_secs (see show()), wrapping.
     if c.overview and c.overview ~= "" then
         cy = cy + 6
-        for _, ln in ipairs(wrap(c.overview, 74, 3)) do line(ln, 22, "C8C8C8") end
+        local olines = math.max(1, tonumber(opts.overview_lines) or 3)
+        if opts.overview_scroll then
+            local all = wrap(c.overview, 74, 999)
+            local pool = #all
+            if pool <= olines then
+                for _, ln in ipairs(all) do line(ln, 22, "C8C8C8") end
+            else
+                local start = overview_scroll_idx % pool
+                for k = 0, olines - 1 do line(all[(start + k) % pool + 1], 22, "C8C8C8") end
+            end
+        else
+            for _, ln in ipairs(wrap(c.overview, 74, olines)) do line(ln, 22, "C8C8C8") end
+        end
     end
 
     -- genres on their own line (swapped with the credits, which are now inline)
     if c.genres and #c.genres > 0 then cy = cy + 4; line(genres_str(c), 22, "DCDCDC", true) end
 
-    -- cast (amber, bold) — "Name (Role)" (role optional), comma-separated, packed
-    -- onto ≤2 lines. Entries may be {name, role} tables (TMDB / .nfo <role>) or
-    -- bare name strings (older caches); over-long entries are ellipsized to fit.
+    -- cast (amber, bold). Each entry is "Name (Role)" (role optional) ellipsized to
+    -- width; entries may be {name, role} tables (TMDB / .nfo <role>) or bare name
+    -- strings (older caches). Default: comma-packed onto ≤2 rows. With cast_scroll:
+    -- a fixed cast_lines window over the list, one entry per line, advanced by
+    -- cast_scroll_idx (stepped on a timer in show()) with wraparound.
     if c.cast and #c.cast > 0 then
-        local fs, nmax = 22, math.max(1, tonumber(opts.cast_max) or 5)
+        local fs = tonumber(opts.cast_fs) or 22
+        local cbold = opts.cast_bold ~= false
+        local nmax = math.max(1, tonumber(opts.cast_max) or 5)
         local entries = {}
         for i = 1, math.min(nmax, #c.cast) do
             local e = c.cast[i]
@@ -1650,7 +1679,34 @@ local function build_card(c)
                 entries[#entries + 1] = ellipsize_px(s, innerw, fs)
             end
         end
-        if #entries > 0 then
+        if opts.cast_scroll and #entries > 0 then
+            cy = cy + 4
+            local nlines = math.max(1, tonumber(opts.cast_lines) or 2)
+            local ncols = math.max(1, tonumber(opts.cast_cols) or 2)
+            local per, pool, gut = nlines * ncols, #entries, 16
+            local colw = math.floor(innerw / ncols)
+            local scroll = pool > per
+            -- advance a whole row (ncols) per step so the grid reads as scrolling up
+            local start = scroll and ((cast_scroll_idx * ncols) % pool) or 0
+            -- draw one cell at column dx, current cy, without advancing cy
+            local function cell(str, dx)
+                str = ellipsize_px(str, colw - gut, fs)
+                content[#content + 1] = string.format(
+                    "{\\an7\\pos(%d,%d)\\alpha&H%s&\\bord2\\shad1\\3c&H000000&\\1c&H00D7FF&\\fs%d%s}%s",
+                    x + pad + dx, math.floor(cy), fa(0), fs, cbold and "\\b1" or "", ass_escape(str))
+            end
+            for r = 0, nlines - 1 do
+                local drew = false
+                for cix = 0, ncols - 1 do
+                    local seq = r * ncols + cix
+                    local e
+                    if scroll then e = entries[(start + seq) % pool + 1]
+                    elseif (seq + 1) <= pool then e = entries[seq + 1] end
+                    if e then cell(e, cix * colw); drew = true end
+                end
+                if drew then cy = cy + math.floor(fs * 1.25) end
+            end
+        elseif #entries > 0 then
             cy = cy + 4
             local rows, cur = {}, ""
             for _, s in ipairs(entries) do
@@ -1667,7 +1723,7 @@ local function build_card(c)
             -- the last row must not end on a separator (a 5th entry that didn't
             -- fit leaves the 2nd row with a trailing comma) — strip it.
             if #rows > 0 then rows[#rows] = (rows[#rows]:gsub(",%s*$", "")) end
-            for _, r in ipairs(rows) do line(r, fs, "00D7FF", true) end
+            for _, r in ipairs(rows) do line(r, fs, "00D7FF", cbold) end
         end
     end
 
@@ -1706,42 +1762,58 @@ local function build_card(c)
             cy = cy + ph
         end
 
-        -- audio / subtitle languages (own full-width line; duration/chapters/size
-        -- moved to the very bottom line, below the progress bar)
-        local as = {}
-        if tt.audio then as[#as + 1] = "Audio: " .. tt.audio end
-        if tt.subs then as[#as + 1] = "Subs: " .. tt.subs end
-        if #as > 0 then cy = cy + 6; line(table.concat(as, "    "), 18, "8C8C8C") end
+        -- bottom line: audio · subs · chapters · size (one line). Duration is
+        -- omitted here — it's already the /total in the progress-bar caption. The
+        -- long subs list is trimmed so chapters/size always survive at the end.
+        local fs, SEP = 18, "  \226\128\162  "
+        local head, tail = {}, {}
+        if tt.audio then head[#head + 1] = "Audio: " .. tt.audio end
+        if tt.chapters and tt.chapters > 0 then tail[#tail + 1] = string.format("%d chapters", tt.chapters) end
+        if tt.size then tail[#tail + 1] = tt.size end
+        local subs = tt.subs and ("Subs: " .. tt.subs) or nil
+        local function join(sv)
+            local p = {}
+            for _, v in ipairs(head) do p[#p + 1] = v end
+            if sv then p[#p + 1] = sv end
+            for _, v in ipairs(tail) do p[#p + 1] = v end
+            return table.concat(p, SEP)
+        end
+        local full = join(subs)
+        if subs and text_w(full, fs) > innerw then
+            local room = innerw - text_w(join(nil) .. SEP, fs)
+            subs = ellipsize_px(subs, math.max(80, room), fs)
+            full = join(subs)
+        end
+        if full ~= "" then cy = cy + 6; line(full, fs, "8C8C8C") end
 
-        -- live progress bar
+        -- live progress bar + caption on ONE line: bar on the left, the
+        -- "cur / total • ends HH:MM" caption right-aligned beside it.
         local pct = mp.get_property_number("percent-pos")
         if pct and pct > 0.5 and pct < 99.5 then
             cy = cy + 12
-            local barh = 8
-            local fillw = math.max(2, math.floor(innerw * pct / 100))
-            local bx = x + pad
-            content[#content + 1] = string.format(
-                "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H555555&\\1a&H%s&\\p1}%s{\\p0}",
-                bx, math.floor(cy), fa(64), rrect(innerw, barh, 4))
-            content[#content + 1] = string.format(
-                "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H00D7FF&\\1a&H%s&\\p1}%s{\\p0}",
-                bx, math.floor(cy), fa(0), rrect(fillw, barh, 4))
-            cy = cy + barh + 6
+            local barh, cfs, gap = 8, 17, 14
             local rem, tp = mp.get_property_number("time-remaining"), mp.get_property_number("time-pos")
             local info = string.format("%d%%", math.floor(pct + 0.5))
             if tp and rem then
                 info = fmt_duration(tp) .. " / " .. fmt_duration(tp + rem)
-                    .. "   \226\128\162   ends " .. os.date("%H:%M", os.time() + math.floor(rem))
+                    .. "   [" .. os.date("%H:%M", os.time() + math.floor(rem)) .. "]"
             end
-            line(info, 17, "A0A0A0")
+            local capw = text_w(info, cfs)
+            local barw = math.max(60, innerw - capw - gap)
+            local fillw = math.max(2, math.floor(barw * pct / 100))
+            local bx = x + pad
+            local bary = cy + math.floor((cfs - barh) / 2) -- centre the bar on the caption
+            content[#content + 1] = string.format(
+                "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H555555&\\1a&H%s&\\p1}%s{\\p0}",
+                bx, bary, fa(64), rrect(barw, barh, 4))
+            content[#content + 1] = string.format(
+                "{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H00D7FF&\\1a&H%s&\\p1}%s{\\p0}",
+                bx, bary, fa(0), rrect(fillw, barh, 4))
+            content[#content + 1] = string.format(
+                "{\\an7\\pos(%d,%d)\\alpha&H%s&\\bord2\\shad1\\3c&H000000&\\1c&HA0A0A0&\\fs%d}%s",
+                bx + barw + gap, math.floor(cy), fa(0), cfs, ass_escape(info))
+            cy = cy + math.floor(cfs * 1.25)
         end
-
-        -- duration · chapters · size — the last line at the bottom of the card
-        local dl = {}
-        if tt.dur then dl[#dl + 1] = tt.dur end
-        if tt.chapters and tt.chapters > 0 then dl[#dl + 1] = string.format("%d chapters", tt.chapters) end
-        if tt.size then dl[#dl + 1] = tt.size end
-        if #dl > 0 then cy = cy + 6; line(table.concat(dl, "  \226\128\162  "), 18, "8C8C8C") end
     end
 
     end -- close the livetv / movie-tv content branch
@@ -1789,6 +1861,8 @@ end
 hide = function()
     if hide_timer then hide_timer:kill(); hide_timer = nil end
     if refresh_timer then refresh_timer:kill(); refresh_timer = nil end
+    if cast_scroll_timer then cast_scroll_timer:kill(); cast_scroll_timer = nil end
+    if overview_scroll_timer then overview_scroll_timer:kill(); overview_scroll_timer = nil end
     if signal_timer then signal_timer:kill(); signal_timer = nil end
     overlay:remove()
     fanart_hide()
@@ -1830,6 +1904,30 @@ show = function(timeout)
     -- live-refresh the progress bar / ETA while the card is visible
     if refresh_timer then refresh_timer:kill() end
     refresh_timer = mp.add_periodic_timer(1, function() if visible then render() end end)
+
+    -- cast marquee: advance the window on its own cadence (build_card reads the idx)
+    if cast_scroll_timer then cast_scroll_timer:kill(); cast_scroll_timer = nil end
+    cast_scroll_idx = 0
+    if opts.cast_scroll then
+        local cs = tonumber(opts.cast_scroll_secs) or 0
+        if cs > 0 then
+            cast_scroll_timer = mp.add_periodic_timer(cs, function()
+                if visible then cast_scroll_idx = cast_scroll_idx + 1; render() end
+            end)
+        end
+    end
+
+    -- synopsis marquee: advance one wrapped line on its own cadence
+    if overview_scroll_timer then overview_scroll_timer:kill(); overview_scroll_timer = nil end
+    overview_scroll_idx = 0
+    if opts.overview_scroll then
+        local ov = tonumber(opts.overview_scroll_secs) or 0
+        if ov > 0 then
+            overview_scroll_timer = mp.add_periodic_timer(ov, function()
+                if visible then overview_scroll_idx = overview_scroll_idx + 1; render() end
+            end)
+        end
+    end
 
     if hide_timer then hide_timer:kill(); hide_timer = nil end
     if timeout and timeout > 0 then hide_timer = mp.add_timeout(timeout, hide) end
