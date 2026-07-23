@@ -9,11 +9,13 @@ year, rating, genres, plot, cast, and live file details.
 Runs **fully offline** — everything comes from the files next to your media.
 Online lookup (TMDB) is optional and off unless you add a key.
 
-![spincard — clearlogo, poster, fanart backdrop and a spinning disc](docs/screenshots/spindisc.png)
+![spincard — Waterworld: clearlogo title, poster, a spinning disc, star rating and tier-coloured tech pills](docs/screenshots/spindisc.png)
 
-![spincard — rich .nfo metadata card](docs/screenshots/movie.png)
+![spincard — Avatar: The Way of Water: rich card with tagline, star rating, cast and gold 4K · HDR10 pills](docs/screenshots/movie.png)
 
-![spincard — TV episode card (season progress, air date, cast)](docs/screenshots/tv.png)
+![spincard — Breaking Bad TV episode card: clearlogo, season progress, air date, plot, director and cast](docs/screenshots/tv.png)
+
+![spincard — live TV via Tvheadend: current programme, channel, signal/SNR meter, transponder pills and an "Up next" list](docs/screenshots/livetv.png)
 
 ## Features
 
@@ -160,7 +162,7 @@ lookups for live TV. If your server needs auth, embed it in the URL
 
 ## Badges
 
-![Sample tech badge row — 4K · HDR10 in gold, HEVC · EAC3 · 5.1 in green, 23.976FPS in grey](docs/screenshots/badges.png)
+![Sample tech badge row — 4K · HDR10 in gold, HEVC · 5.1 in green, AC3 · 23.976FPS in grey](docs/screenshots/badges.png)
 
 The card's tech line is a row of **pill badges** summarising the stream. The six
 file-detail pills are **tier-coloured** — the colour tells you how good each spec
