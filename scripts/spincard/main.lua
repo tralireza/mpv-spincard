@@ -58,14 +58,18 @@ local opts = {
     disc_spin_secs = 2.5,   -- seconds per full rotation (higher = slower)
     disc_spin_frames = 96,  -- rotation frames (more = smoother; larger temp file)
     cast_max      = 5,      -- max cast entries shown/cycled (also the scroll pool size)
-    cast_scroll   = false,  -- scroll the cast through a fixed grid (else pack ≤2 rows)
-    cast_scroll_secs = 2.5, -- seconds between cast scroll steps (0 = don't advance)
-    cast_lines    = 2,      -- cast grid rows when cast_scroll is on
-    cast_cols     = 2,      -- cast entries per row (2nd column starts at the card middle)
+    cast_scroll   = true,   -- scroll the cast (else pack ≤2 rows); style set by cast_scroll_dir
+    cast_scroll_dir = "horizontal", -- "horizontal" (1-line glide ticker) | "vertical" (2×2 grid)
+    cast_scroll_px = 3,     -- horizontal glide: px advanced per tick (speed)
+    cast_scroll_interval = 0.1, -- horizontal glide: seconds per tick (smoothness)
+    cast_scroll_secs = 2.5, -- vertical grid: seconds between row steps (0 = don't advance)
+    cast_lines    = 2,      -- cast grid rows (vertical style)
+    cast_cols     = 2,      -- cast entries per row, vertical style (2nd col starts at card middle)
     cast_fs       = 22,     -- cast font size
     cast_bold     = true,   -- cast in bold
     overview_scroll = false,-- scroll the synopsis through a fixed overview_lines window
     overview_scroll_secs = 1,-- seconds between synopsis scroll steps (0 = don't advance)
+    overview_scroll_delay = 3,-- seconds to hold the first synopsis window before scrolling (read the opening line)
     overview_lines = 3,     -- synopsis viewport height (lines)
     nfo_supplement = true,  -- fill a local .nfo's MISSING fields (cast/genres/…) from TMDB (needs api_key)
     region        = "",     -- certification region (e.g. GB, US); "" => derive from `language`
@@ -1412,7 +1416,7 @@ local function build_card(c)
         if sub ~= "" then line(sub, 24, "00D7FF") end
         if c.overview and c.overview ~= "" then
             cy = cy + 6
-            for _, ln in ipairs(wrap(c.overview, 74, 4)) do line(ln, 22, "C8C8C8") end
+            for _, ln in ipairs(wrap_px(c.overview, math.floor(innerw * 1.22), 22, 4)) do line(ln, 22, "C8C8C8") end
         end
         if c.start and c.stop and c.stop > c.start then
             local now = os.time()
@@ -1640,31 +1644,40 @@ local function build_card(c)
     -- overview / synopsis. Default: wrapped to overview_lines, static. With
     -- overview_scroll: a fixed overview_lines window over the FULL wrapped text,
     -- advanced one line every overview_scroll_secs (see show()), wrapping.
+    -- Wrap by PIXELS to innerw (like the cast line) so lines fill the full card
+    -- width to the right edge, not a rough 74-char guess.
     if c.overview and c.overview ~= "" then
         cy = cy + 6
+        local ofs = 22
+        -- text_w over-estimates this font (its ~0.6*fs/glyph vs the OSD sans' real
+        -- ~0.5), so wrapping to exactly innerw breaks ~a word early. Wrap to a
+        -- compensated budget (~1.22x, the measured ratio) so lines fill to the right
+        -- edge like the cast line; typical prose stays within the card.
+        local owrapw = math.floor(innerw * 1.22)
         local olines = math.max(1, tonumber(opts.overview_lines) or 3)
         if opts.overview_scroll then
-            local all = wrap(c.overview, 74, 999)
+            local all = wrap_px(c.overview, owrapw, ofs, 999)
             local pool = #all
             if pool <= olines then
-                for _, ln in ipairs(all) do line(ln, 22, "C8C8C8") end
+                for _, ln in ipairs(all) do line(ln, ofs, "C8C8C8") end
             else
                 local start = overview_scroll_idx % pool
-                for k = 0, olines - 1 do line(all[(start + k) % pool + 1], 22, "C8C8C8") end
+                for k = 0, olines - 1 do line(all[(start + k) % pool + 1], ofs, "C8C8C8") end
             end
         else
-            for _, ln in ipairs(wrap(c.overview, 74, olines)) do line(ln, 22, "C8C8C8") end
+            for _, ln in ipairs(wrap_px(c.overview, owrapw, ofs, olines)) do line(ln, ofs, "C8C8C8") end
         end
     end
 
     -- genres on their own line (swapped with the credits, which are now inline)
     if c.genres and #c.genres > 0 then cy = cy + 4; line(genres_str(c), 22, "DCDCDC", true) end
 
-    -- cast (amber, bold). Each entry is "Name (Role)" (role optional) ellipsized to
-    -- width; entries may be {name, role} tables (TMDB / .nfo <role>) or bare name
-    -- strings (older caches). Default: comma-packed onto ≤2 rows. With cast_scroll:
-    -- a fixed cast_lines window over the list, one entry per line, advanced by
-    -- cast_scroll_idx (stepped on a timer in show()) with wraparound.
+    -- cast (amber, bold). Each entry is "Name (Role)" (role optional); entries may
+    -- be {name, role} tables (TMDB / .nfo <role>) or bare name strings (older caches).
+    -- Three layouts: cast_scroll on + cast_scroll_dir="horizontal" (default) → a
+    -- single line gliding left; ="vertical" → a fixed cast_lines×cast_cols grid
+    -- scrolled a row at a time; cast_scroll off → comma-packed onto ≤2 rows. The
+    -- scrolling layouts read cast_scroll_idx (stepped on a timer in show()).
     if c.cast and #c.cast > 0 then
         local fs = tonumber(opts.cast_fs) or 22
         local cbold = opts.cast_bold ~= false
@@ -1679,7 +1692,34 @@ local function build_card(c)
                 entries[#entries + 1] = ellipsize_px(s, innerw, fs)
             end
         end
-        if opts.cast_scroll and #entries > 0 then
+        local cdir = tostring(opts.cast_scroll_dir or "horizontal"):lower()
+        if opts.cast_scroll and #entries > 0 and cdir ~= "vertical" then
+            -- horizontal glide ticker (default): a comma-separated "Name (Role)"
+            -- list clipped to ONE line and scrolled left cast_scroll_px per tick
+            -- (cast_scroll_idx, stepped in show()). Seamless loop: two copies split
+            -- by a gap, offset wrapped by the period width (fits => drawn static).
+            cy = cy + 4
+            local full = table.concat(entries, ", ")
+            if text_w(full, fs) <= innerw then
+                line(full, fs, "00D7FF", cbold) -- fits: static, no scroll (advances cy)
+            else
+                local lineh = math.floor(fs * 1.25)
+                local px = math.max(1, tonumber(opts.cast_scroll_px) or 3)
+                local gap = "     \226\128\162     " -- "   •   " spacer between copies
+                local period = text_w(full .. gap, fs)
+                local text = full .. gap .. full   -- 2nd copy keeps the window filled
+                local off = (cast_scroll_idx * px) % period
+                content[#content + 1] = string.format(
+                    "{\\an7\\q2\\pos(%d,%d)\\clip(%d,%d,%d,%d)\\alpha&H%s&\\bord2\\shad1"
+                        .. "\\3c&H000000&\\1c&H00D7FF&\\fs%d%s}%s",
+                    math.floor(x + pad - off), math.floor(cy),
+                    math.floor(x + pad), math.floor(cy),
+                    math.floor(x + pad + innerw), math.floor(cy + lineh),
+                    fa(0), fs, cbold and "\\b1" or "", ass_escape(text))
+                cy = cy + lineh
+            end
+        elseif opts.cast_scroll and #entries > 0 then
+            -- vertical style: fixed cast_lines × cast_cols grid, scrolled a row at a time
             cy = cy + 4
             local nlines = math.max(1, tonumber(opts.cast_lines) or 2)
             local ncols = math.max(1, tonumber(opts.cast_cols) or 2)
@@ -1842,6 +1882,13 @@ local function build_card(c)
                 out[i] = out[i]:gsub("\\pos%((%-?%d+),(%-?%d+)%)", function(px, py)
                     return string.format("\\pos(%s,%d)", px, tonumber(py) + shift)
                 end)
+                -- rectangular \clip(x1,y1,x2,y2) must move with its \pos'd text
+                -- (the cast marquee) — shift the y pair, keep x1/x2.
+                out[i] = out[i]:gsub("\\clip%((%-?%d+),(%-?%d+),(%-?%d+),(%-?%d+)%)",
+                    function(x1, y1, x2, y2)
+                        return string.format("\\clip(%s,%d,%s,%d)",
+                            x1, tonumber(y1) + shift, x2, tonumber(y2) + shift)
+                    end)
             end
             if logo_rect then logo_rect.y = logo_rect.y + shift end
         end
@@ -1905,11 +1952,15 @@ show = function(timeout)
     if refresh_timer then refresh_timer:kill() end
     refresh_timer = mp.add_periodic_timer(1, function() if visible then render() end end)
 
-    -- cast marquee: advance the window on its own cadence (build_card reads the idx)
+    -- cast marquee: advance the idx on its own cadence (build_card reads the idx).
+    -- Horizontal glide steps fast (cast_scroll_interval); vertical grid steps a row
+    -- every cast_scroll_secs. Timer-driven (not ASS \move) so it animates while paused.
     if cast_scroll_timer then cast_scroll_timer:kill(); cast_scroll_timer = nil end
     cast_scroll_idx = 0
     if opts.cast_scroll then
-        local cs = tonumber(opts.cast_scroll_secs) or 0
+        local cs = (tostring(opts.cast_scroll_dir or "horizontal"):lower() == "vertical")
+            and (tonumber(opts.cast_scroll_secs) or 0)
+            or (tonumber(opts.cast_scroll_interval) or 0)
         if cs > 0 then
             cast_scroll_timer = mp.add_periodic_timer(cs, function()
                 if visible then cast_scroll_idx = cast_scroll_idx + 1; render() end
@@ -1917,15 +1968,27 @@ show = function(timeout)
         end
     end
 
-    -- synopsis marquee: advance one wrapped line on its own cadence
+    -- synopsis marquee: hold the first window for overview_scroll_delay (so the
+    -- opening line is readable) before advancing one wrapped line every
+    -- overview_scroll_secs. The initial one-shot timeout hands off to the periodic
+    -- timer (reusing overview_scroll_timer so hide() kills whichever is live).
     if overview_scroll_timer then overview_scroll_timer:kill(); overview_scroll_timer = nil end
     overview_scroll_idx = 0
     if opts.overview_scroll then
         local ov = tonumber(opts.overview_scroll_secs) or 0
         if ov > 0 then
-            overview_scroll_timer = mp.add_periodic_timer(ov, function()
+            local delay = math.max(0, tonumber(opts.overview_scroll_delay) or 0)
+            local function step()
                 if visible then overview_scroll_idx = overview_scroll_idx + 1; render() end
-            end)
+            end
+            if delay > 0 then
+                overview_scroll_timer = mp.add_timeout(delay, function()
+                    step()
+                    overview_scroll_timer = mp.add_periodic_timer(ov, step)
+                end)
+            else
+                overview_scroll_timer = mp.add_periodic_timer(ov, step)
+            end
         end
     end
 
