@@ -91,11 +91,24 @@ end
 -- ASS drawing / rating / date ----------------------------------------------
 
 -- Rounded-rectangle ASS drawing path (corners approximated with beziers).
-function M.rrect(w, h, r)
+-- Origin defaults to (0,0) — the form used by \p1 fills positioned via \pos. Pass
+-- (ox,oy) for an ABSOLUTE-coordinate path (e.g. a vector \clip/\iclip, which is not
+-- moved by \pos): the whole box is emitted at (ox,oy)..(ox+w,oy+h).
+function M.rrect(w, h, r, ox, oy)
+    ox, oy = ox or 0, oy or 0
     r = math.max(0, math.min(r, math.floor(w / 2), math.floor(h / 2)))
+    local x0, y0, x1, y1 = ox, oy, ox + w, oy + h -- box corners
     return string.format(
-        "m %d 0 l %d 0 b %d 0 %d 0 %d %d l %d %d b %d %d %d %d %d %d l %d %d b 0 %d 0 %d 0 %d l 0 %d b 0 0 0 0 %d 0",
-        r, w - r, w, w, w, r, w, h - r, w, h, w, h, w - r, h, r, h, h, h, h - r, r, r)
+        "m %d %d l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d l %d %d b %d %d %d %d %d %d",
+        x0 + r, y0,                 -- start after the top-left arc
+        x1 - r, y0,                 -- top edge
+        x1, y0, x1, y0, x1, y0 + r, -- top-right corner
+        x1, y1 - r,                 -- right edge
+        x1, y1, x1, y1, x1 - r, y1, -- bottom-right corner
+        x0 + r, y1,                 -- bottom edge
+        x0, y1, x0, y1, x0, y1 - r, -- bottom-left corner
+        x0, y0 + r,                 -- left edge
+        x0, y0, x0, y0, x0 + r, y0) -- top-left corner
 end
 
 -- 5-star string + BGR colour from a 0-10 score.

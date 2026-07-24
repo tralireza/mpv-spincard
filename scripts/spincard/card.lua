@@ -579,13 +579,31 @@ function M.build_card(c)
     local bh = (cy - y) + pad
     card_rect = { x = x, y = y, w = bw, h = bh }
     local out = {}
-    -- drop shadow: the box shape offset down-right, drawn ONLY outside the box via
-    -- \iclip(box rect) — a bottom+right lip, not a soft halo bleeding through the
-    -- translucent fill on all four sides (which is what \shad did).
+    -- drop shadow: the box shape offset down-right, drawn ONLY outside the box — a
+    -- bottom+right lip, not a soft halo bleeding through the translucent fill on all
+    -- four sides (which is what \shad did). The exclusion is a VECTOR \iclip of the
+    -- card's ROUNDED shape (not its bounding rect): a rectangular iclip would also
+    -- blank the shadow inside the box's rounded-corner triangles, which the card
+    -- itself doesn't cover — so at the bottom-right (both offsets stack) a sliver of
+    -- video showed through. Clipping to the exact rounded shape fills that gap.
+    -- iclip coords are ABSOLUTE (not moved by \pos), so make_shadow rebuilds the
+    -- whole event for a given top — the bottom-anchor shift below re-emits it rather
+    -- than gsub-shifting (the numeric gsub can't move a vector-clip drawing).
     local sh = 6 -- shadow offset (px, down-right)
-    out[#out + 1] = string.format(
-        "{\\an7\\pos(%d,%d)\\iclip(%d,%d,%d,%d)\\bord0\\shad0\\1c&H000000&\\1a&H%s&\\p1}%s{\\p0}",
-        x + sh, y + sh, x, y, x + bw, y + bh, fa(96), rrect(bw, bh, 16))
+    -- Inset the exclusion `si` px INSIDE the card silhouette so the shadow tucks a
+    -- hair under the card's edge. The fill and an inverse clip on the SAME path both
+    -- anti-alias the shared boundary pixel, leaving it only partly covered — and the
+    -- translucent fill then lets the video blaze through as a ~1px hairline all along
+    -- the lip. Overlapping inward by `si` hides that seam behind the (near-opaque)
+    -- card edge; the sliver of shadow now under the translucent fill is imperceptible.
+    local si = 1 -- shadow-under-card inset (px)
+    local function make_shadow(top)
+        return string.format(
+            "{\\an7\\pos(%d,%d)\\iclip(%s)\\bord0\\shad0\\1c&H000000&\\1a&H%s&\\p1}%s{\\p0}",
+            x + sh, top + sh, rrect(bw - 2 * si, bh - 2 * si, 16 - si, x + si, top + si),
+            fa(96), rrect(bw, bh, 16))
+    end
+    out[#out + 1] = make_shadow(y) -- out[1]: the shadow (regenerated on shift below)
     -- rounded card box (translucent) on top
     out[#out + 1] = fill_rrect(x, y, bw, bh, 16, "141414", fa(51))
     -- inset accent bar (thin)
@@ -601,11 +619,14 @@ function M.build_card(c)
         card_rect.y = new_top
         local shift = new_top - y
         if shift ~= 0 then
-            -- ONE gsub pass per event shifts every y: \pos(x,y), and \clip/\iclip
-            -- (x1,y1,x2,y2) — the only \tag(numbers) tokens in an event — so the clip
-            -- rects track their \pos'd text (cast marquee) and the shadow's iclip
-            -- tracks the box. (Was three separate full-string scans per event.)
-            for i = 1, #out do
+            -- The shadow (out[1]) carries a VECTOR \iclip the numeric gsub below can't
+            -- shift, so re-emit it at the shifted top instead of scanning it.
+            out[1] = make_shadow(new_top)
+            -- ONE gsub pass per remaining event shifts every y: \pos(x,y), and
+            -- \clip/\iclip (x1,y1,x2,y2) — the only \tag(numbers) tokens in an event —
+            -- so the clip rects track their \pos'd text (cast marquee). (Was three
+            -- separate full-string scans per event.)
+            for i = 2, #out do
                 out[i] = out[i]:gsub("\\(%a+)%(([%-%d,]+)%)", function(tag, nums)
                     if tag == "pos" then
                         local px, py = nums:match("^(%-?%d+),(%-?%d+)$")
