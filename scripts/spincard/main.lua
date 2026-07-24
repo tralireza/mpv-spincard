@@ -70,7 +70,7 @@ local opts = {
     show_disc      = true,  -- 3/4 disc.png nestled at the card's top-left corner
     disc_size      = 0.22,  -- disc diameter as a fraction of the video height
     disc_spin      = true,  -- spin the disc while the card is showing
-    disc_spin_secs = 2.5,   -- seconds per full rotation (higher = slower)
+    disc_spin_secs = 5,     -- seconds per full rotation (higher = slower; 5 just reads nicer)
     disc_spin_frames = 96,  -- rotation frames (more = smoother; larger temp file)
     cast_max      = 5,      -- max cast entries shown/cycled (also the scroll pool size)
     cast_scroll   = true,   -- scroll the cast (else pack ≤2 rows); style set by cast_scroll_dir
@@ -254,9 +254,16 @@ show = function(timeout)
     if live_ctx then live_refresh() end -- re-read the EPG each time the card appears
     render()
     if fanart_paused_ok() then fanart_show() end -- paused-only gate (see fanart_pause_only)
-    poster_show()
-    banner_show()
-    disc_spin_start()
+    -- Defer the image overlay-add draws off the toggle key handler: on card open
+    -- this burst runs on mpv's playback thread and can stall audio for a moment.
+    -- Guard on `visible` — a quick open→close (hide() clears these overlays) could
+    -- otherwise let this deferred pass re-add an orphan onto an already-hidden card.
+    mp.add_timeout(0, function()
+        if not visible then return end
+        poster_show()
+        banner_show()
+        disc_spin_start()
+    end)
 
     -- live tuner signal: kill-before-create (show() is re-entered without hide()
     -- on channel change / live→file), an immediate reading, then poll on its own
