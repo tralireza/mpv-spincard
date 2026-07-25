@@ -4,16 +4,19 @@ A cinematic **now-playing card** for [mpv](https://mpv.io) — it identifies the
 movie or TV episode you're watching and overlays a rich info card built from
 your **local Kodi/Emby library artwork and `.nfo` metadata**: poster, dimmed
 fanart backdrop, transparent clearlogo title, a **spinning disc**, plus title,
-year, rating, genres, plot, cast, and live file details.
+year, ratings (IMDb · Rotten Tomatoes · Metacritic · TMDB), awards, box office,
+genres, a scrolling plot, cast, and live file details.
 
-Runs **fully offline** — everything comes from the files next to your media.
-Online lookup (TMDB) is optional and off unless you add a key.
+Works **fully offline** from the files next to your media. Optional online lookups
+add more: **TMDB** for metadata + an artwork fallback when a title has no local
+images, and **OMDb** for IMDb / Rotten Tomatoes / Metacritic scores — each off
+unless you add its key.
 
-![spincard — Waterworld: clearlogo title, poster, a spinning disc, star rating and tier-coloured tech pills](docs/screenshots/spindisc.png)
+![spincard — Waterworld: local banner and clearlogo title, poster and a spinning disc, an IMDb · Rotten Tomatoes · Metacritic · TMDB rating row, awards, box office, genres, scrolling plot, cast and tier-coloured tech pills](docs/screenshots/spindisc.png)
 
-![spincard — Avatar: The Way of Water: rich card with tagline, star rating, cast and gold 4K · HDR10 pills](docs/screenshots/movie.png)
+![spincard — Avatar: Fire and Ash: TMDB-hosted clearlogo, poster and fanart with no local artwork, an IMDb · Rotten Tomatoes · Metacritic · TMDB rating row, "Won 1 Oscar", box office, genres above a scrolling plot, and cast](docs/screenshots/movie.png)
 
-![spincard — Breaking Bad TV episode card: clearlogo, season progress, air date, plot, director and cast](docs/screenshots/tv.png)
+![spincard — Breaking Bad TV episode card: banner and clearlogo, S04E01 season progress, IMDb and TMDB rating, air date, genres, plot and cast](docs/screenshots/tv.png)
 
 ![spincard — live TV via Tvheadend: current programme, channel, signal/SNR meter, transponder pills and an "Up next" list](docs/screenshots/livetv.png)
 
@@ -28,6 +31,8 @@ Online lookup (TMDB) is optional and off unless you add a key.
   - **Fanart** backdrop (`fanart.jpg` / `backdrop.jpg`), dimmed, full-frame.
   - **Clearlogo** (`clearlogo.png`) as the title, in the card's title slot.
   - **Disc** (`disc.png`) — a 3/4 disc nestled at the card's corner that **spins**.
+  - **TMDB-hosted fallback** (`remote_art`) — any poster / fanart / clearlogo with
+    no local file is fetched from TMDB and cached to disk, so it downloads once.
 - **Live file details from mpv** (no external tools): codec · HDR/SDR · fps ·
   resolution · container · size, audio/subtitle languages (channels + forced),
   chapter count, and a **live progress bar** with ETA.
@@ -36,24 +41,30 @@ Online lookup (TMDB) is optional and off unless you add a key.
   programme from its EPG: title, channel, plot, a live now-bar with start/end
   times, and an **Up next** list of the following programmes. Resolved from
   the stream URL's channel id.
-- **Optional TMDB** enrichment for files without a full `.nfo`, plus an hourly
-  **rating refresh** from TMDB for any card — rating is treated as dynamic, so
-  even a local `.nfo` card gets a live rating (both need an API key).
+- **Ratings from multiple sources** — a colour-coded ★ **IMDb** headline (via the
+  OMDb API) with a right-hand cluster of **TMDB**, **Rotten Tomatoes** and
+  **Metacritic** score pills, plus **awards** ("Won 3 Oscars") and **box office**.
+  Ratings are dynamic (hourly refresh); even a local `.nfo` card gets live scores.
+- **Optional TMDB enrichment** for files without a full `.nfo` — genres, cast,
+  director, studio, certification, tagline, runtime — and the TMDB artwork fallback
+  above. TMDB needs `api_key`; IMDb / Rotten Tomatoes / Metacritic need
+  `omdb_api_key` (independent — set either, both, or neither).
 - Bottom-anchored card that grows upward; shows only for real video (not
-  images/audio); toggle key; auto-hide; colour-coded star rating; and a row of
-  **tier-coloured pill badges** (see [Badges](#badges)).
+  images/audio); toggle key; auto-hide; colour-coded star rating; a **scrolling
+  synopsis** and cast marquee; and a row of **tier-coloured pill badges** (see
+  [Badges](#badges)).
 
 ## Layout
 
 Where each piece is drawn on the mpv output. Every position is a fraction of the
 **live output size**, so the same layout holds at 1080p, 4K, or in a resized window:
 
-![spincard layout on the mpv output: full-frame dimmed fanart backdrop, poster top-right, optional banner top-left, and the card bottom-left with a spinning 3/4 disc on its corner](docs/layout-desktop.svg)
+![spincard layout on the mpv output: full-frame dimmed fanart backdrop, poster top-right, banner top-left (on by default), and the card bottom-left with a spinning 3/4 disc on its corner](docs/layout-desktop.svg)
 
 And the card's own top-to-bottom anatomy (shown as a fully-populated **movie** card
 — a TV episode or a TMDB-only card renders fewer rows):
 
-![spincard card anatomy: clearlogo title slot, year, tagline, colour-coded star rating with a TMDB source pill, genres, plot, director, cast, tier-coloured tech pills, and a live progress bar, with the 3/4 disc on the top-left corner](docs/layout-card.svg)
+![spincard card anatomy: clearlogo title slot, year, tagline, an IMDb star-rating headline with TMDB · Rotten Tomatoes · Metacritic pills, a meta line (runtime · certificate · box office · director · studio), an awards line, genres above the plot, cast, tier-coloured tech pills, and a live progress bar, with the 3/4 disc on the top-left corner](docs/layout-card.svg)
 
 mpv draws image overlays **above** the ASS text, so the layers stack back-to-front
 as `fanart → poster → banner → clearlogo → disc`. That's why the fanart is dimmed
@@ -65,7 +76,8 @@ spill over the card's top-right corner.
 
 - **mpv** built with Lua (LuaJIT or Lua 5.1/5.2).
 - **ffmpeg** on `PATH` — for the poster / fanart / clearlogo / disc images.
-- **curl** — only if you enable TMDB (`api_key`) or Tvheadend (`tvheadend_url`).
+- **curl** — only for the online features: TMDB (`api_key`), OMDb (`omdb_api_key`),
+  the TMDB artwork fallback (`remote_art`), or Tvheadend (`tvheadend_url`).
 
 ## Install
 
@@ -108,13 +120,15 @@ pos_x=40  pos_y=40     # margin in a 1280x720 virtual space
 show_poster=yes   poster_height=0.42   poster_margin=0.02
 show_fanart=yes   fanart_opacity=0.25   fanart_pause_only=yes   # dimmed backdrop, shown while paused
 show_logo=yes     logo_height=0.12
+remote_art=yes    # fetch poster/fanart/clearlogo from TMDB when there's no local file (cached to disk)
 show_disc=yes     disc_size=0.22
 disc_spin=yes     disc_spin_secs=2.5   disc_spin_frames=96
-show_banner=no    banner_height=0.10
+show_banner=yes   banner_height=0.10   # wide banner.jpg top-left (if present)
 show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
+overview_scroll=yes  overview_lines=4  overview_scroll_secs=3   # scrolling synopsis
 
-enrich=yes   api_key=   language=en-US   # TMDB (optional; empty = local only)
-rating_ttl=3600                          # refresh rating from TMDB when older than this (s); 0 = off
+enrich=yes   api_key=   omdb_api_key=   language=en-US   # TMDB + OMDb (optional; empty = local only)
+rating_ttl=3600                          # refresh IMDb/TMDB ratings when older than this (s); 0 = off
 tvheadend_url=                           # live-TV EPG (e.g. http://127.0.0.1:9981)
 live_upcoming=3                          # live TV: "Up next" programmes to list (0 = none)
 ```
@@ -195,7 +209,8 @@ list won't be mislabelled as legacy.
 Two more pill sets carry **fixed** colours (identity/category, not quality):
 
 ```
-TMDB pill    │ on the ★ rating row when the rating came from TMDB (TMDB blue)
+Rating row   │ IMDb (gold, the headline) + a right-aligned cluster of TMDB (blue) ·
+             │ Rotten Tomatoes (red) · Metacritic (green) score pills
 Live-TV mux  │ delivery system (DVB-S2…) + modulation (8PSK…) in card gold;
              │ polarisation V/H in blue/violet
 ```
@@ -205,7 +220,9 @@ Live-TV mux  │ delivery system (DVB-S2…) + modulation (8PSK…) in card gold
 `identify.lua` parses the path → `nfo.lua` reads the sidecar → `main.lua` draws
 the card (ASS via `osd-overlay`) and the artwork (BGRA via `overlay-add`, decoded
 by ffmpeg). The disc spin packs rotation frames into one file and cycles the
-overlay byte-offset. Live file details come straight from mpv properties.
+overlay byte-offset. Live file details come straight from mpv properties. Optional
+TMDB/OMDb lookups and the remote-artwork download run as async `curl` subprocesses,
+cached under `~/.cache/spincard/` so a title is only fetched once.
 
 ## Notes
 

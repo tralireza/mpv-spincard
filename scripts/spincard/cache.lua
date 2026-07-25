@@ -55,14 +55,29 @@ end
 
 -- IMDb rating (via OMDb) gets its OWN "rating_imdb/<key>" slot so it can be shown
 -- alongside the TMDB rating (rating/<key>) without either clobbering the other.
--- Same short TTL (rating_stale) and positive-only policy; also keeps the vote count.
+-- Same short TTL (rating_stale) and positive-only policy; also keeps the vote count
+-- and the OMDb critic/awards/box-office extras (rt/mc/awards/boxoffice). Bump
+-- IMDB_VER when the stored shape grows so pre-version entries refetch once (else the
+-- new fields wouldn't appear until the TTL expires) — get flags `_old` for main.
+local IMDB_VER = 2
 function M.imdb_rating_get(cachekey)
     local rc = cache_get("rating_imdb/" .. cachekey)
-    if rc and rc.v then return tonumber(rc.v), tonumber(rc.t), tonumber(rc.votes) end
+    if rc and rc.v then
+        return tonumber(rc.v), tonumber(rc.t), {
+            votes = tonumber(rc.votes), rt = tonumber(rc.rt), mc = tonumber(rc.mc),
+            awards = rc.awards, boxoffice = tonumber(rc.boxoffice),
+            _old = (tonumber(rc._v) or 1) < IMDB_VER,
+        }
+    end
 end
-function M.imdb_rating_put(cachekey, r, votes)
-    r = tonumber(r)
-    if r and r > 0 then cache_put("rating_imdb/" .. cachekey, { v = r, t = os.time(), votes = votes }) end
+function M.imdb_rating_put(cachekey, res)
+    local r = tonumber(res and res.rating)
+    if r and r > 0 then
+        cache_put("rating_imdb/" .. cachekey, {
+            _v = IMDB_VER, v = r, t = os.time(), votes = res.votes,
+            rt = res.rt, mc = res.mc, awards = res.awards, boxoffice = res.boxoffice,
+        })
+    end
 end
 
 -- Supplement: fields a local .nfo may lack that TMDB can supply (rating is a

@@ -23,6 +23,41 @@ local RES_X, RES_Y = layout.RES_X, layout.RES_Y -- virtual card space (matches m
 local opts, deps = {}, {}
 function M.init(o, d) opts, deps = o, d end
 
+-- Remote artwork (TMDB CDN) ------------------------------------------------
+-- Fetch a TMDB image (path like "/abc.jpg") at `size` (w500/w1280/original) via curl
+-- and hand the file to the normal decode path. cb(file) or cb(nil) on any failure
+-- (offline, 404, empty) so callers fall through cleanly. The SOURCE image is cached
+-- PERSISTENTLY under ~/.cache/spincard/img/<size>_<sanitised-path> — keyed on the
+-- stable TMDB path (NOT the mpv pid), so a title's art downloads ONCE and is reused
+-- across playback sessions; a cache hit skips curl entirely. (The per-session BGRA
+-- decode still runs, same as local art.) Download to a pid-tagged .part temp then
+-- rename, so an interrupted/concurrent transfer never leaves a corrupt cache entry.
+local TMDB_IMG = "https://image.tmdb.org/t/p/"
+local IMG_CACHE = (os.getenv("HOME") or "/tmp") .. "/.cache/spincard/img"
+os.execute("mkdir -p '" .. IMG_CACHE .. "' 2>/dev/null")
+local function img_cache_path(size, path)
+    return IMG_CACHE .. "/" .. size .. "_" .. (path:gsub("[^%w%-_.]", "_"))
+end
+function M.fetch_image(path, size, _tag, cb)
+    if not path or path == "" then return cb(nil) end
+    local dest = img_cache_path(size, path)
+    local fi = utils.file_info(dest)
+    if fi and fi.size and fi.size > 0 then return cb(dest) end -- cache hit: no download
+    local tmp = dest .. "." .. (mp.get_property("pid") or "x") .. ".part"
+    local url = TMDB_IMG .. size .. path
+    mp.command_native_async({ name = "subprocess", playback_only = false,
+        args = { "curl", "-fsSL", "--max-time", "15", "-o", tmp, url } },
+        function(ok, res)
+            if not ok or not res or res.status ~= 0 then
+                os.remove(tmp); msg.warn("image fetch failed: " .. url); return cb(nil)
+            end
+            local f2 = utils.file_info(tmp)
+            if not f2 or not f2.size or f2.size == 0 then os.remove(tmp); return cb(nil) end
+            os.rename(tmp, dest) -- atomic publish into the cache
+            cb(dest)
+        end)
+end
+
 -- Poster image: decode a local jpg -> BGRA (ffmpeg), draw with overlay-add ---
 
 local poster = {

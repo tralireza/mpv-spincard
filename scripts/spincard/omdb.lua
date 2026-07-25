@@ -15,11 +15,18 @@ local OMDB = "https://www.omdbapi.com/"
 local opts = {}
 function M.init(o) opts = o end
 
--- Parse an OMDb response object -> { rating=<0..10>, votes=<num|nil>, imdb_id } or
--- nil. Pure (no network) so it can be unit-tested with a fabricated table. OMDb
--- returns strings: imdbRating "8.0" or "N/A"; imdbVotes "1,234,567" or "N/A";
--- Response "True"/"False". A rate-limit/error still returns valid JSON with
--- Response=="False" (curl exits 0), so this yields nil -> graceful fallback.
+-- Parse an OMDb response object -> { rating=<0..10>, votes, imdb_id, rt, mc,
+-- awards, boxoffice } or nil. Pure (no network) so it can be unit-tested with a
+-- fabricated table. OMDb returns strings: imdbRating "8.0" or "N/A"; imdbVotes
+-- "1,234,567" or "N/A"; Response "True"/"False". A rate-limit/error still returns
+-- valid JSON with Response=="False" (curl exits 0), so this yields nil -> graceful
+-- fallback. The extra critic/awards/box-office fields ride along with a valid IMDb
+-- rating (the anchor); each is best-effort and absent/"N/A" -> nil.
+local function na(s) -- OMDb string field, or nil when empty / "N/A"
+    s = s and tostring(s)
+    if s and s ~= "" and s ~= "N/A" then return s end
+    return nil -- explicit: a bare `return` yields zero values, breaking tonumber(na(x))
+end
 local function parse_omdb(d)
     if not d or tostring(d.Response) ~= "True" then return nil end
     local r = tonumber(d.imdbRating) -- "N/A" -> nil
@@ -28,7 +35,28 @@ local function parse_omdb(d)
     if d.imdbVotes and d.imdbVotes ~= "N/A" then
         votes = tonumber((tostring(d.imdbVotes):gsub("[^%d]", ""))) -- "1,234,567" -> 1234567
     end
-    return { rating = r, votes = votes, imdb_id = d.imdbID }
+    -- Rotten Tomatoes % and Metacritic come from the Ratings[] array
+    -- ({Source,Value}); Metacritic also has a top-level Metascore. RT "82%" -> 82,
+    -- MC "67/100" or Metascore "67" -> 67.
+    local rt, mc
+    if type(d.Ratings) == "table" then
+        for _, e in ipairs(d.Ratings) do
+            if e.Source == "Rotten Tomatoes" and e.Value then
+                rt = tonumber((tostring(e.Value):gsub("%%", "")))
+            elseif e.Source == "Metacritic" and e.Value then
+                mc = tonumber((tostring(e.Value):match("^(%d+)")))
+            end
+        end
+    end
+    if not mc then mc = tonumber(na(d.Metascore)) end
+    local awards = na(d.Awards)
+    local boxoffice = na(d.BoxOffice)
+    if boxoffice then
+        boxoffice = tonumber((boxoffice:gsub("[^%d]", ""))) -- "$785,221,649" -> 785221649
+        if not boxoffice or boxoffice == 0 then boxoffice = nil end
+    end
+    return { rating = r, votes = votes, imdb_id = d.imdbID,
+             rt = rt, mc = mc, awards = awards, boxoffice = boxoffice }
 end
 M.parse_omdb = parse_omdb -- exported for the standalone unit test
 

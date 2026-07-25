@@ -68,6 +68,7 @@ local opts = {
     show_banner    = true, -- wide banner.jpg top-left (opaque JPEG, no alpha)
     banner_height  = 0.10,  -- banner height as a fraction of the video height
     show_logo      = true,  -- clearlogo.png title art, top-left (transparent PNG)
+    remote_art     = true,  -- when no LOCAL poster/fanart/clearlogo sits beside the media, fall back to TMDB-hosted art (needs api_key + network)
     logo_height    = 0.12,  -- logo height as a fraction of the video height
     logo_autocrop  = true,  -- crop the clearlogo's transparent margins so its slot maps to real artwork
     show_disc      = true,  -- 3/4 disc.png nestled at the card's top-left corner
@@ -83,12 +84,12 @@ local opts = {
     cast_scroll_secs = 2.5, -- vertical grid: seconds between row steps (0 = don't advance)
     cast_lines    = 2,      -- cast grid rows (vertical style)
     cast_cols     = 2,      -- cast entries per row, vertical style (2nd col starts at card middle)
-    cast_fs       = 22,     -- cast font size
+    cast_fs       = 21,     -- cast font size (body tier: matches genre/synopsis/meta)
     cast_bold     = true,   -- cast in bold
-    overview_scroll = false,-- scroll the synopsis through a fixed overview_lines window
-    overview_scroll_secs = 1,-- seconds between synopsis scroll steps (0 = don't advance)
+    overview_scroll = true, -- scroll the synopsis through a fixed overview_lines window
+    overview_scroll_secs = 3,-- seconds between synopsis scroll steps (0 = don't advance)
     overview_scroll_delay = 3,-- seconds to hold the first synopsis window before scrolling (read the opening line)
-    overview_lines = 3,     -- synopsis viewport height (lines)
+    overview_lines = 4,     -- synopsis viewport height (lines)
     nfo_supplement = true,  -- fill a local .nfo's MISSING fields (cast/genres/…) from TMDB (needs api_key)
     region        = "",     -- certification region (e.g. GB, US); "" => derive from `language`
 }
@@ -111,7 +112,7 @@ local omdb_fetch_rating = omdb.fetch_rating
 local tvh_fetch, tvh_signal = tvheadend.tvh_fetch, tvheadend.tvh_signal
 
 local RES_X, RES_Y = layout.RES_X, layout.RES_Y
-local CARD_VER = 2 -- disk-card schema; a cached card below this is refetched once
+local CARD_VER = 4 -- disk-card schema; a cached card below this is refetched once
                    -- so pre-v2 caches (no cast/genres/…) auto-upgrade on next play
 
 local overlay = mp.create_osd_overlay("ass-events")
@@ -385,11 +386,14 @@ local function on_file_loaded()
     live_ctx = nil -- a normal file: leave live-TV mode
 
     local id = identify(path)
+    -- local-art discovery via images.* (not bound locals) to keep on_file_loaded
+    -- under LuaJIT's 60-upvalue ceiling now that it also references `images` for the
+    -- remote-art fallback below.
     local poster_path = find_poster(path, id)
-    local logo_path = opts.show_logo and find_clearlogo(path, id) or nil
-    local disc_path = opts.show_disc and find_disc(path, id) or nil
-    local fanart_path = opts.show_fanart and find_fanart(path, id) or nil
-    local banner_path = opts.show_banner and find_banner(path, id) or nil
+    local logo_path = opts.show_logo and images.find_clearlogo(path, id) or nil
+    local disc_path = opts.show_disc and images.find_disc(path, id) or nil
+    local fanart_path = opts.show_fanart and images.find_fanart(path, id) or nil
+    local banner_path = opts.show_banner and images.find_banner(path, id) or nil
 
     -- Confidence promotion: identify() returns kind="unknown" when the path
     -- carries no content-type signal (no Movies/Films or TV folder, no SxxEyy).
@@ -470,16 +474,25 @@ local function on_file_loaded()
     local do_imdb = false
     if opts.enrich and opts.omdb_api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0
         and id.kind ~= "unknown" then
-        local iv, it, ivotes = imdb_rating_get(id.cachekey)
-        if iv then cur_card.rating_imdb, cur_card.rating_imdb_votes = iv, ivotes end
-        if rating_stale(it) then do_imdb = true end
+        local iv, it, ix = imdb_rating_get(id.cachekey)
+        if iv then
+            cur_card.rating_imdb, cur_card.rating_imdb_votes = iv, ix and ix.votes
+            if ix then
+                cur_card.rt, cur_card.mc = ix.rt, ix.mc
+                cur_card.awards, cur_card.boxoffice = ix.awards, ix.boxoffice
+            end
+        end
+        -- refetch when stale OR when the cached entry predates the extras schema
+        if rating_stale(it) or (ix and ix._old) then do_imdb = true end
     end
     local imdb_fired = false
     local function apply_imdb(g, res)
         if not res then return end
-        imdb_rating_put(id.cachekey, res.rating, res.votes) -- authoritative cache (before the gen guard)
+        imdb_rating_put(id.cachekey, res) -- authoritative cache (before the gen guard)
         if g ~= current_gen then return end
         cur_card.rating_imdb, cur_card.rating_imdb_votes = res.rating, res.votes
+        cur_card.rt, cur_card.mc = res.rt, res.mc
+        cur_card.awards, cur_card.boxoffice = res.awards, res.boxoffice
         if visible then render() end
     end
     local function fire_imdb(g)
@@ -494,6 +507,62 @@ local function on_file_loaded()
             year    = cur_card.year or id.year,
             kind    = id.kind, season = id.season, episode = id.episode,
         }, function(res) apply_imdb(g, res) end)
+    end
+
+    -- Remote artwork fallback (TMDB-hosted): when NO local file sits beside the
+    -- media, fetch the TMDB image the card carries (clearlogo/backdrop/poster) and
+    -- run it through the same decode path. Idempotent per load via `remote_done`;
+    -- called after the local decodes (cached cards already hold the paths) and again
+    -- once do_tmdb populates cur_card. `tmdb_path` guards against feeding a local
+    -- absolute path (a .nfo poster) to the CDN — TMDB paths are a single "/seg.ext".
+    local remote_done = {}
+    local function tmdb_path(p) return (p and p:match("^/[^/]+%.%a+$")) and p or nil end
+    local function fetch_remote_art(g)
+        if not opts.remote_art or not cur_card then return end
+        if opts.show_logo and not logo_path and not remote_done.logo then
+            local lp = tmdb_path(cur_card.logo_path)
+            if lp then
+                remote_done.logo = true
+                images.fetch_image(lp, "w500", "logo", function(f)
+                    if not f or g ~= current_gen then return end
+                    clearlogo.ready = false
+                    clearlogo_decode(f, function(ok)
+                        if not (ok and g == current_gen) then return end
+                        -- build_card reserves the logo band (and drops the text title)
+                        -- only when has_logo is set — do it now that the remote art
+                        -- decoded, so the title swaps text -> logo on this render.
+                        cur_card.has_logo = true
+                        if visible then render() end
+                    end)
+                end)
+            end
+        end
+        if opts.show_fanart and not fanart_path and not remote_done.fanart then
+            local bp = tmdb_path(cur_card.backdrop)
+            if bp then
+                remote_done.fanart = true
+                images.fetch_image(bp, "w1280", "fanart", function(f)
+                    if not f or g ~= current_gen then return end
+                    fanart.ready = false
+                    fanart_decode(f, function(ok)
+                        if ok and g == current_gen and visible and fanart_paused_ok() then fanart_show() end
+                    end)
+                end)
+            end
+        end
+        if opts.show_poster and not poster_path and not remote_done.poster then
+            local pp = tmdb_path(cur_card.poster)
+            if pp then
+                remote_done.poster = true
+                images.fetch_image(pp, "w500", "poster", function(f)
+                    if not f or g ~= current_gen then return end
+                    poster.ready = false
+                    poster_decode(f, function(ok)
+                        if ok and g == current_gen and visible then poster_show() end
+                    end)
+                end)
+            end
+        end
     end
 
     -- Poster image: decode the local jpg (once per poster), show when ready.
@@ -563,6 +632,10 @@ local function on_file_loaded()
         disc.ready = false
     end
 
+    -- Remote fallback for any art with no local file (cached cards already carry the
+    -- TMDB paths; fresh fetches trigger it again from the do_tmdb callback below).
+    fetch_remote_art(gen)
+
     if opts.auto_show then show(opts.duration) end
 
     -- Fire the IMDb rating lookup: now if we already hold a tconst (.nfo/cache) or
@@ -582,7 +655,20 @@ local function on_file_loaded()
             if gen ~= current_gen then return end
             cur_card = merged(card)
             cur_card.rating_src = "TMDB"
+            -- merged() replaced cur_card, wiping any cached OMDb fields applied at
+            -- load; restore them from the imdb cache so a main-card refetch (e.g. a
+            -- CARD_VER bump) with a still-fresh IMDb cache doesn't drop the IMDb/RT/
+            -- MC/awards/box-office row. fire_imdb below re-fetches only when do_imdb.
+            local iv2, _, ix2 = imdb_rating_get(id.cachekey)
+            if iv2 then
+                cur_card.rating_imdb, cur_card.rating_imdb_votes = iv2, ix2 and ix2.votes
+                if ix2 then
+                    cur_card.rt, cur_card.mc = ix2.rt, ix2.mc
+                    cur_card.awards, cur_card.boxoffice = ix2.awards, ix2.boxoffice
+                end
+            end
             if do_imdb then fire_imdb(gen) end -- now cur_card.imdb_id (external_ids) is set, else title
+            fetch_remote_art(gen)              -- now cur_card carries the TMDB art paths
             if visible then render() end
         end)
     else

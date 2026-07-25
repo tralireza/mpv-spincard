@@ -6,8 +6,8 @@
 <rect x="30" y="52" width="840" height="472" rx="6" fill="url(#fan)" stroke="#0c0e12"/>
 <text x="412" y="123" font-size="13.5" fill="#aab6c8" text-anchor="middle">fanart — full-frame dimmed backdrop</text>
 <text x="412" y="142" font-size="11.5" fill="#8895a8" text-anchor="middle">(fades to a faint 0.1 floor, sits behind everything)</text>
-<rect x="44" y="66" width="175" height="47" rx="4" fill="#2e2e34" stroke="#A8A8A8" stroke-dasharray="5 4" opacity="0.7"/>
-<text x="132" y="94" font-size="12" fill="#A8A8A8" text-anchor="middle">banner (top-left, optional)</text>
+<rect x="44" y="66" width="175" height="47" rx="4" fill="#2e2e34" stroke="#A8A8A8" opacity="0.85"/>
+<text x="132" y="94" font-size="11.5" fill="#E8E8E8" text-anchor="middle">banner — top-left (on by default)</text>
 <rect x="609" y="61" width="252" height="142" rx="4" fill="url(#pos)" stroke="#8aa0b8" stroke-opacity="0.6"/>
 <text x="735" y="128" font-size="15" font-weight="700" fill="#eef3f8" text-anchor="middle">POSTER</text>
 <text x="735" y="147" font-size="11" fill="#cdd8e4" text-anchor="middle">top-right · TV=16:9 thumb, movie=portrait</text>
@@ -17,8 +17,8 @@
 <text x="132" y="323" font-size="19" font-weight="800" fill="#FFD700">clearlogo</text>
 <text x="300" y="322" font-size="11" fill="#A8A8A8">title art</text>
 <text x="118" y="355" font-size="12" fill="#A8A8A8">the card: bottom-left, grows upward (anchor=top hugs the top)</text>
-<text x="118" y="377" font-size="12.5" fill="#E8E8E8">★★★★☆  rating</text>
-<text x="118" y="397" font-size="12.5" fill="#E8E8E8">plot / genres / cast</text>
+<text x="118" y="377" font-size="12.5" fill="#E8E8E8">IMDb ★★★★☆ · TMDB · RT · MC</text>
+<text x="118" y="397" font-size="12.5" fill="#E8E8E8">genres · plot · cast</text>
 <text x="118" y="417" font-size="12.5" fill="#E8E8E8">audio · subs · chapters</text>
 <rect x="118" y="443" width="30" height="20" rx="4" fill="#F5C518"/>
 <text x="133" y="457" font-size="11" font-weight="700" fill="#000" text-anchor="middle">4K</text>

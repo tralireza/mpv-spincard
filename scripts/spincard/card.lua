@@ -148,7 +148,7 @@ function M.build_card(c)
     -- live-TV overview sites (caller adds any leading cy gap); live-TV passes
     -- scroll=false so both stay pixel-identical to the pre-refactor code.
     local function render_overview(text, maxlines, scroll)
-        local ofs = 22
+        local ofs = 21 -- body tier (matches genre/cast/meta)
         if scroll then
             local all = wrap_px(text, fitw, ofs, 999)
             local pool = #all
@@ -335,7 +335,7 @@ function M.build_card(c)
         end
         logo_rect = { x = x + pad, y = cy, h = band }
         cy = cy + band + LOGO_GAP -- clear the logo band (autocrop makes band == artwork)
-        if c.year and c.year ~= "" then line(tostring(c.year), 20, "B4B4B4") end
+        if c.year and c.year ~= "" then line(tostring(c.year), 21, "B4B4B4") end
     else
         local head = c.title or "Unknown"
         if c.year and c.year ~= "" then head = head .. "  (" .. c.year .. ")" end
@@ -346,7 +346,7 @@ function M.build_card(c)
     end
 
     -- tagline (italic)
-    if c.tagline and c.tagline ~= "" then line(c.tagline, 20, "A0A0A0", false, true) end
+    if c.tagline and c.tagline ~= "" then line(c.tagline, 21, "A0A0A0", false, true) end
 
     -- Two compact fields, inline vs own-line: credits (director/studio) go inline
     -- (parens on the TV subline / on the movie meta line); genres get their own line
@@ -372,7 +372,7 @@ function M.build_card(c)
         if c.episode_title and c.episode_title ~= "" then sub = sub .. "   " .. c.episode_title end
         local cr = credit_str(c)
         if cr ~= "" then sub = sub .. "  (" .. cr .. ")" end
-        line(ellipsize_px(sub, fitw, 25), 25, "00D7FF")
+        line(ellipsize_px(sub, fitw, 24), 24, "00D7FF") -- subline tier (matches live-TV)
     end
 
     -- rating: colour-coded stars for the headline score, plus right-aligned source
@@ -413,18 +413,59 @@ function M.build_card(c)
             tx = tx + pill_w(hlabel, nil) + 12  -- the rating + votes text follows the pill
         end
         content[#content + 1] = text_run(tx, cy, rtxt, 23, scolor, { alpha = fa(0), bold = true })
+        -- Secondary ratings clustered at the right edge in order TMDB -> RT -> MC:
+        -- the blue TMDB value pill, then the best-effort OMDb critic pills (Rotten
+        -- Tomatoes red, Metacritic green — fixed brand colours; the stars carry the
+        -- score tier). Right-aligned as ONE group so the cluster ends at the card edge.
+        local rtp, mcp = tonumber(c.rt), tonumber(c.mc)
+        local right = {}
+        if ascore then right[#right + 1] = { text = pill_text(alabel, ascore), bg = "E4B401", fg = "FFFFFF" } end
+        if rtp then right[#right + 1] = { text = string.format("RT %d%%", math.floor(rtp + 0.5)), bg = "0A32FA", fg = "FFFFFF" } end
+        if mcp then right[#right + 1] = { text = string.format("MC %d", math.floor(mcp + 0.5)), bg = "33CC66", fg = "000000" } end
+        if #right > 0 then
+            local gap, total, widths = 8, 0, {}
+            for i, p in ipairs(right) do
+                widths[i] = math.floor(text_w(p.text, pfs) + 2 * ppadx)
+                total = total + widths[i] + (i > 1 and gap or 0)
+            end
+            local px = x + pad + innerw - total -- right-align the whole cluster
+            for i, p in ipairs(right) do
+                pill_badge{ bx = px, by = ry + 2, ty = ry + 6, pw = widths[i], ph = 24, rad = 8,
+                    bg = p.bg, fg = p.fg, fs = pfs, padx = ppadx, text = p.text }
+                px = px + widths[i] + gap
+            end
+        end
         cy = cy + math.floor(23 * 1.25)
-        if ascore then draw_pill(alabel, ascore, x + pad + innerw - pill_w(alabel, ascore)) end -- secondary, right-aligned
     end
 
-    -- meta: aired · runtime · mpaa
+    -- meta: aired · runtime · mpaa · box office · director/studio
+    local function fmt_money(n) -- compact box-office figure, e.g. $785M / $1.2B
+        n = tonumber(n)
+        if not n then return nil end
+        if n >= 1e9 then return string.format("$%.1fB", n / 1e9) end
+        if n >= 1e6 then return string.format("$%.0fM", n / 1e6) end
+        if n >= 1e3 then return string.format("$%.0fK", n / 1e3) end
+        return string.format("$%d", n)
+    end
     local meta = {}
     local aired = c.aired or c.air_date
     if aired and aired ~= "" then meta[#meta + 1] = "Aired " .. fmt_date(aired) end
     if c.runtime and tonumber(c.runtime) then meta[#meta + 1] = string.format("%d min", c.runtime) end
     if c.mpaa and c.mpaa ~= "" then meta[#meta + 1] = c.mpaa end
+    do local bo = fmt_money(c.boxoffice); if bo then meta[#meta + 1] = bo end end
     if c.kind ~= "tv" then local cr = credit_str(c); if cr ~= "" then meta[#meta + 1] = cr end end
     if #meta > 0 then line(ellipsize_px(table.concat(meta, "   \226\128\162   "), fitw, 21), 21, "B4B4B4") end
+
+    -- awards highlight (from OMDb): the leading clause only ("Won 3 Oscars." ->
+    -- "Won 3 Oscars"), on its own gold ★ line so it reads as a badge, not buried in
+    -- the grey meta row. Best-effort; absent for much TV / obscure titles.
+    if c.awards and c.awards ~= "" then
+        local head = c.awards:match("^[^.]+") or c.awards
+        line(ellipsize_px("\226\152\133 " .. head, fitw, 21), 21, "18C5F5")
+    end
+
+    -- genres on their own line (above the synopsis)
+    if c.genres and #c.genres > 0 then cy = cy + 4; line(genres_str(c), 21, "DCDCDC", true) end
 
     -- overview / synopsis. Default: wrapped to overview_lines, static. With
     -- overview_scroll: a fixed overview_lines window over the FULL wrapped text,
@@ -436,9 +477,6 @@ function M.build_card(c)
         render_overview(c.overview, math.max(1, tonumber(opts.overview_lines) or 3), opts.overview_scroll)
     end
 
-    -- genres on their own line (swapped with the credits, which are now inline)
-    if c.genres and #c.genres > 0 then cy = cy + 4; line(genres_str(c), 22, "DCDCDC", true) end
-
     -- cast (amber, bold). Each entry is "Name (Role)" (role optional); entries may
     -- be {name, role} tables (TMDB / .nfo <role>) or bare name strings (older caches).
     -- Three layouts: cast_scroll on + cast_scroll_dir="horizontal" (default) → a
@@ -446,7 +484,7 @@ function M.build_card(c)
     -- scrolled a row at a time; cast_scroll off → comma-packed onto ≤2 rows. The
     -- scrolling layouts read cast_scroll_idx (stepped on a timer in show()).
     if c.cast and #c.cast > 0 then
-        local fs = tonumber(opts.cast_fs) or 22
+        local fs = tonumber(opts.cast_fs) or 21
         local cbold = opts.cast_bold ~= false
         local nmax = math.max(1, tonumber(opts.cast_max) or 5)
         local entries = {}
@@ -552,7 +590,7 @@ function M.build_card(c)
         add("fps", tt.fps and (tt.fps .. "FPS") or nil) -- e.g. "24FPS" / "23.976FPS" / "50FPS"
         if #pills > 0 then
             cy = cy + 8
-            local ph, pfs, ppadx, pgap = 30, 18, 12, 8
+            local ph, pfs, ppadx, pgap = 26, 16, 10, 8
             local px = x + pad
             for _, p in ipairs(pills) do
                 local pw = math.floor(text_w(p.t, pfs) + 2 * ppadx) -- text_w, like the other pills
