@@ -18,6 +18,7 @@ local ass_escape, fmt_duration, wrap = util.ass_escape, util.fmt_duration, util.
 local rrect, star_rating, fmt_date, res_label = util.rrect, util.star_rating, util.fmt_date, util.res_label
 local pill_colors, fmt_metric, tier_color = util.pill_colors, util.fmt_metric, util.tier_color
 local text_w, wrap_px, ellipsize_px = util.text_w, util.wrap_px, util.ellipsize_px
+local fmt_votes = util.fmt_votes
 
 local RES_X, RES_Y = layout.RES_X, layout.RES_Y
 
@@ -374,20 +375,46 @@ function M.build_card(c)
         line(ellipsize_px(sub, fitw, 25), 25, "00D7FF")
     end
 
-    -- rating: colour-coded stars, plus a source pill (e.g. TMDB) right-aligned on
-    -- the row when the shown rating is remote-sourced (c.rating_src).
-    local rscore = tonumber(c.rating)
-    if rscore and rscore > 0 then
-        local stars, scolor = star_rating(rscore)
+    -- rating: colour-coded stars for the headline score, plus right-aligned source
+    -- pills. IMDb is the headline when present (stars + score + IMDb pill), with TMDB
+    -- shown as a secondary "TMDB 7.8" value pill beside it; a single source is the
+    -- headline on its own (the TMDB-only path is unchanged from before).
+    local imdb_s, tmdb_s = tonumber(c.rating_imdb), tonumber(c.rating)
+    local hscore, hlabel, hvotes, ascore, alabel
+    if imdb_s and imdb_s > 0 then
+        hscore, hlabel, hvotes = imdb_s, "IMDb", c.rating_imdb_votes
+        if tmdb_s and tmdb_s > 0 then ascore, alabel = tmdb_s, (c.rating_src or "TMDB") end
+    elseif tmdb_s and tmdb_s > 0 then
+        hscore, hlabel = tmdb_s, c.rating_src -- "TMDB", or nil for a bare .nfo rating (no pill)
+    end
+    if hscore then
+        local stars, scolor = star_rating(hscore)
         local ry = cy
-        line(string.format("%s  %.1f", stars, rscore), 23, scolor, true)
-        if c.rating_src and c.rating_src ~= "" then
-            local t, pfs, ph, ppadx = c.rating_src, 15, 24, 9
-            local pw = math.floor(text_w(t, pfs) + 2 * ppadx) -- text_w, like the other pills
-            local ppx = x + pad + innerw - pw -- right-align to the card inner width
-            pill_badge{ bx = ppx, by = ry + 2, ty = ry + 6, pw = pw, ph = ph, rad = 8,
-                bg = "E4B401", fg = "FFFFFF", fs = pfs, padx = ppadx, text = t }
+        local rtxt = string.format("%s  %.1f", stars, hscore)
+        if opts.imdb_votes and hlabel == "IMDb" and hvotes then
+            rtxt = rtxt .. "  (" .. (fmt_votes(hvotes) or "") .. ")"
         end
+        -- source pills. Colours are BGR: TMDB brand blue (E4B401 = #01B4E4), IMDb gold
+        -- (18C5F5 = #F5C518). The headline pill LEADS the row (before the rating +
+        -- votes, so it labels the score); a secondary source pill (present only when
+        -- both TMDB and IMDb are shown) is right-aligned to the card's inner edge.
+        local pfs, ppadx = 15, 9
+        local function pill_text(label, score) return score and string.format("%s %.1f", label, score) or label end
+        local function pill_w(label, score) return math.floor(text_w(pill_text(label, score), pfs) + 2 * ppadx) end
+        local function draw_pill(label, score, px)
+            local bg, fg = "E4B401", "FFFFFF"
+            if label == "IMDb" then bg, fg = "18C5F5", "000000" end
+            pill_badge{ bx = px, by = ry + 2, ty = ry + 6, pw = pill_w(label, score), ph = 24, rad = 8,
+                bg = bg, fg = fg, fs = pfs, padx = ppadx, text = pill_text(label, score) }
+        end
+        local tx = x + pad
+        if hlabel and hlabel ~= "" then
+            draw_pill(hlabel, nil, tx)          -- headline pill leads the row
+            tx = tx + pill_w(hlabel, nil) + 12  -- the rating + votes text follows the pill
+        end
+        content[#content + 1] = text_run(tx, cy, rtxt, 23, scolor, { alpha = fa(0), bold = true })
+        cy = cy + math.floor(23 * 1.25)
+        if ascore then draw_pill(alabel, ascore, x + pad + innerw - pill_w(alabel, ascore)) end -- secondary, right-aligned
     end
 
     -- meta: aired · runtime · mpaa

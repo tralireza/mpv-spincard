@@ -59,6 +59,14 @@ function M.human_size(b)
     return string.format((i >= 3) and "%.1f %s" or "%.0f %s", b, u[i])
 end
 
+-- Compact vote count: 1234567 -> "1.2M", 12345 -> "12k", 999 -> "999".
+function M.fmt_votes(n)
+    n = tonumber(n); if not n then return nil end
+    if n >= 1e6 then return string.format("%.1fM", n / 1e6) end
+    if n >= 1e3 then return string.format("%.0fk", n / 1e3) end
+    return string.format("%d", n)
+end
+
 function M.chan_label(n)
     if not n then return nil end
     if n == 1 then return "Mono" end

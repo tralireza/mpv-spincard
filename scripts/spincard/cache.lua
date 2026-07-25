@@ -53,6 +53,18 @@ function M.rating_stale(t)
     return (not t) or (os.time() - t) >= ttl
 end
 
+-- IMDb rating (via OMDb) gets its OWN "rating_imdb/<key>" slot so it can be shown
+-- alongside the TMDB rating (rating/<key>) without either clobbering the other.
+-- Same short TTL (rating_stale) and positive-only policy; also keeps the vote count.
+function M.imdb_rating_get(cachekey)
+    local rc = cache_get("rating_imdb/" .. cachekey)
+    if rc and rc.v then return tonumber(rc.v), tonumber(rc.t), tonumber(rc.votes) end
+end
+function M.imdb_rating_put(cachekey, r, votes)
+    r = tonumber(r)
+    if r and r > 0 then cache_put("rating_imdb/" .. cachekey, { v = r, t = os.time(), votes = votes }) end
+end
+
 -- Supplement: fields a local .nfo may lack that TMDB can supply (rating is a
 -- separate dynamic property, so it is NOT in this list). Cached under a distinct
 -- "extra/<key>" entry so the local-first .nfo body on disk is never touched.

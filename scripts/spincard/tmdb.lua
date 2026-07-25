@@ -84,6 +84,15 @@ local function parse_details(kind, d)
             if rr.iso_3166_1 == region and rr.rating and rr.rating ~= "" then out.mpaa = rr.rating; break end
         end
     end
+    -- IMDb id (tconst) for the IMDb/OMDb rating lookup: TV -> external_ids gives the
+    -- SERIES tconst; movie details returns imdb_id at the top level.
+    if kind == "tv" then
+        if type(d.external_ids) == "table" and d.external_ids.imdb_id and d.external_ids.imdb_id ~= "" then
+            out.imdb_id = d.external_ids.imdb_id
+        end
+    elseif d.imdb_id and d.imdb_id ~= "" then
+        out.imdb_id = d.imdb_id
+    end
     return out
 end
 
@@ -97,7 +106,7 @@ end
 function M.tmdb_details(kind, tmdb_id, cb)
     local lang = "&language=" .. urlencode(opts.language)
     local path = (kind == "tv") and "tv" or "movie"
-    local append = (kind == "tv") and "credits,content_ratings" or "credits,release_dates"
+    local append = (kind == "tv") and "credits,content_ratings,external_ids" or "credits,release_dates,external_ids"
     local url = string.format("%s/%s/%s?api_key=%s%s&append_to_response=%s",
         TMDB, path, tostring(tmdb_id), opts.api_key, lang, append)
     curl_json(url, function(d)
@@ -127,7 +136,7 @@ function M.tmdb_fetch(id, cb)
                 poster = r.poster_path, season = id.season, episode = id.episode,
             }
             if not r.id then return cb(card) end
-            local durl = string.format("%s/tv/%d?api_key=%s%s&append_to_response=credits,content_ratings",
+            local durl = string.format("%s/tv/%d?api_key=%s%s&append_to_response=credits,content_ratings,external_ids",
                 TMDB, r.id, opts.api_key, lang)
             curl_json(durl, function(dd)
                 overlay_fields(card, parse_details("tv", dd))
@@ -167,7 +176,7 @@ function M.tmdb_fetch(id, cb)
                 rating = r.vote_average, overview = r.overview, poster = r.poster_path,
             }
             if not r.id then return cb(card) end
-            local durl = string.format("%s/movie/%d?api_key=%s%s&append_to_response=credits,release_dates",
+            local durl = string.format("%s/movie/%d?api_key=%s%s&append_to_response=credits,release_dates,external_ids",
                 TMDB, r.id, opts.api_key, lang)
             curl_json(durl, function(dd)
                 overlay_fields(card, parse_details("movie", dd))

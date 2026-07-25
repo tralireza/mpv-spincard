@@ -26,6 +26,7 @@ local util      = require("util")
 local cache     = require("cache")
 local sidecar   = require("sidecar")
 local tmdb      = require("tmdb")
+local omdb      = require("omdb")
 local tvheadend = require("tvheadend")
 local images    = require("images")
 local layout    = require("layout")
@@ -46,6 +47,8 @@ local opts = {
     api_key   = "",        -- TMDB API key; empty => filename-only card
     language  = "en-US",   -- TMDB response language
     rating_ttl = 3600,     -- refresh rating from TMDB when the cached value is older than this (s); 0 = off
+    omdb_api_key = "",     -- OMDb API key for the IMDb rating; empty => IMDb source off (shown alongside TMDB when both keys set)
+    imdb_votes = true,     -- show the IMDb vote count next to the rating (e.g. 8.1 (1.2M))
     tvheadend_url = "",    -- e.g. http://127.0.0.1:9981 — live-TV EPG source ("" = off)
     live_upcoming = 7,     -- live TV: how many upcoming programmes to keep for "Up next" (0 = none)
     live_upcoming_lines = 3, -- live TV: "Up next" visible window (rows); scrolls through the pool if more
@@ -93,16 +96,18 @@ options.read_options(opts, "spincard")
 
 -- Wire the split-out modules to the runtime options, then bind the functions this
 -- file still calls to plain locals so every existing call site stays unchanged.
-cache.init(opts); tmdb.init(opts); tvheadend.init(opts)
+cache.init(opts); tmdb.init(opts); omdb.init(opts); tvheadend.init(opts)
 -- (util's display/text helpers are used by card.lua/tech.lua directly now, not here)
 local cache_get, cache_put = cache.cache_get, cache.cache_put
 local rating_get, rating_put, rating_stale = cache.rating_get, cache.rating_put, cache.rating_stale
+local imdb_rating_get, imdb_rating_put = cache.imdb_rating_get, cache.imdb_rating_put
 local nfo_missing, fill_missing, pick_supplement =
     cache.nfo_missing, cache.fill_missing, cache.pick_supplement
 local file_exists, read_local, find_poster, count_season_episodes, dir_has_image =
     sidecar.file_exists, sidecar.read_local, sidecar.find_poster,
     sidecar.count_season_episodes, sidecar.dir_has_image
 local tmdb_fetch, tmdb_details = tmdb.tmdb_fetch, tmdb.tmdb_details
+local omdb_fetch_rating = omdb.fetch_rating
 local tvh_fetch, tvh_signal = tvheadend.tvh_fetch, tvheadend.tvh_signal
 
 local RES_X, RES_Y = layout.RES_X, layout.RES_Y
@@ -458,6 +463,39 @@ local function on_file_loaded()
         if not do_tmdb and rating_stale(rt) then do_rating = true end
     end
 
+    -- IMDb rating (via OMDb): an independent dynamic property shown ALONGSIDE the
+    -- TMDB one. Show the freshest cached value now; refetch on load when missing or
+    -- stale. Gated on omdb_api_key only (not api_key), so a card with no TMDB key
+    -- still gets an IMDb rating. Fired below once an IMDb id (or title) is in hand.
+    local do_imdb = false
+    if opts.enrich and opts.omdb_api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0
+        and id.kind ~= "unknown" then
+        local iv, it, ivotes = imdb_rating_get(id.cachekey)
+        if iv then cur_card.rating_imdb, cur_card.rating_imdb_votes = iv, ivotes end
+        if rating_stale(it) then do_imdb = true end
+    end
+    local imdb_fired = false
+    local function apply_imdb(g, res)
+        if not res then return end
+        imdb_rating_put(id.cachekey, res.rating, res.votes) -- authoritative cache (before the gen guard)
+        if g ~= current_gen then return end
+        cur_card.rating_imdb, cur_card.rating_imdb_votes = res.rating, res.votes
+        if visible then render() end
+    end
+    local function fire_imdb(g)
+        if imdb_fired then return end
+        imdb_fired = true
+        omdb_fetch_rating({
+            imdb_id = cur_card.imdb_id,
+            -- a TMDB tconst for TV is the SERIES id (needs Season/Episode); a .nfo
+            -- tconst is already episode/movie-level, so query it by id directly.
+            series  = (id.kind == "tv") and cur_card.imdb_id ~= nil and cur_card.source == "TMDB",
+            title   = cur_card.title or id.query or id.display,
+            year    = cur_card.year or id.year,
+            kind    = id.kind, season = id.season, episode = id.episode,
+        }, function(res) apply_imdb(g, res) end)
+    end
+
     -- Poster image: decode the local jpg (once per poster), show when ready.
     poster_hide()
     if opts.show_poster and poster_path then
@@ -527,6 +565,14 @@ local function on_file_loaded()
 
     if opts.auto_show then show(opts.duration) end
 
+    -- Fire the IMDb rating lookup: now if we already hold a tconst (.nfo/cache) or
+    -- there's no TMDB body fetch to wait on (title fallback); otherwise the do_tmdb
+    -- callback chains it once external_ids supplies the tconst.
+    if do_imdb then
+        if cur_card.imdb_id then fire_imdb(gen)
+        elseif not do_tmdb then fire_imdb(gen) end
+    end
+
     if do_tmdb then
         tmdb_fetch(id, function(card)
             if not card then return end
@@ -536,6 +582,7 @@ local function on_file_loaded()
             if gen ~= current_gen then return end
             cur_card = merged(card)
             cur_card.rating_src = "TMDB"
+            if do_imdb then fire_imdb(gen) end -- now cur_card.imdb_id (external_ids) is set, else title
             if visible then render() end
         end)
     else
