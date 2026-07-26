@@ -172,15 +172,45 @@ function M.build_card(c)
         -- heading() (wraps to <=2 lines), the channel+subtitle line tail-ellipsised.
         -- Without this, long text (some EPGs stuff the whole synopsis into
         -- `subtitle`) is unbounded and spills past the card (see heading()).
-        heading((c.title and c.title ~= "") and c.title or (c.channel or "Live TV"), 34, nil, 2)
-        local sub = c.channel or ""
-        if c.subtitle and c.subtitle ~= "" then
-            sub = (sub ~= "" and (sub .. "   \226\128\162   ") or "") .. c.subtitle
-        end
-        if sub ~= "" then line(ellipsize_px(sub, fitw, 24), 24, "00D7FF") end
-        if c.overview and c.overview ~= "" then
+        if c.no_epg then
+            -- No EPG entry covers the current time (a guide gap): mirror the normal
+            -- live layout but substitute the channel for the MISSING programme title.
+            -- The channel goes in the title slot (heading) AND stays on its usual cyan
+            -- subline, and "[No program information]" drops into the synopsis slot. A
+            -- countdown bar + the signal / transponder / "Next" list still render below.
+            heading(c.channel or "Live TV", 34, nil, 2)                 -- title slot -> channel
+            if c.channel and c.channel ~= "" then
+                line(ellipsize_px(c.channel, fitw, 24), 24, "00D7FF")   -- channel stays on the subline
+            end
             cy = cy + 6
-            render_overview(c.overview, 4, false)
+            line("[No program information]", 21, "A0A0A0", false, true) -- synopsis slot
+            -- Countdown "progress" bar to the next programme. We know `now` and the
+            -- next entry's start, but NOT the gap's start (TVH's grid never returns the
+            -- just-ended programme), so this is an imminence gauge over a 1h lookahead:
+            -- it fills as the next programme nears (empty when it's far off), and the
+            -- caption always shows the exact wait + its clock time. The 1 Hz refresh
+            -- re-renders, so the countdown ticks down live.
+            local nx = c.upcoming and c.upcoming[1]
+            if nx and nx.start then
+                local remaining = nx.start - os.time()
+                if remaining > 0 then
+                    local W = 3600 -- imminence window (TV slots run ~30-60 min)
+                    local pct = math.max(0, math.min(100, (1 - remaining / W) * 100))
+                    progress_row(pct, string.format("Next in %s   [%s]",
+                        fmt_duration(remaining), os.date("%H:%M", nx.start)))
+                end
+            end
+        else
+            heading((c.title and c.title ~= "") and c.title or (c.channel or "Live TV"), 34, nil, 2)
+            local sub = c.channel or ""
+            if c.subtitle and c.subtitle ~= "" then
+                sub = (sub ~= "" and (sub .. "   \226\128\162   ") or "") .. c.subtitle
+            end
+            if sub ~= "" then line(ellipsize_px(sub, fitw, 24), 24, "00D7FF") end
+            if c.overview and c.overview ~= "" then
+                cy = cy + 6
+                render_overview(c.overview, 4, false)
+            end
         end
         if c.start and c.stop and c.stop > c.start then
             local now = os.time()

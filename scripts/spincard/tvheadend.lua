@@ -79,30 +79,51 @@ local function tvh_resolve(path, chan_name, cb)
     end)
 end
 
--- Resolve the channel -> its current programme card (or nil). entries[1] is the
--- programme on now; entries[2..] are what follows, kept as an `upcoming` list.
+-- Resolve the channel -> its current programme card (or nil). The EPG grid is
+-- ordered by start and forward-filtered (current + future), so entries[1] is
+-- USUALLY the programme on now — but NOT when the guide has a gap over the current
+-- time, in which case entries[1] is the next (future) programme. Trusting it there
+-- shows a not-yet-aired programme dressed up as "now" (the bug). So SCAN for the
+-- entry that actually COVERS now (start <= now < stop); if none does there is no
+-- current programme -> return a `no_epg` card (channel + upcoming only). `upcoming`
+-- is always the future programmes (start > now), whether or not one is on air.
 function M.tvh_fetch(path, chan_name, cb)
     tvh_resolve(path, chan_name, function(uuid)
         if not uuid then return cb(nil) end
         local want = math.max(0, math.floor(tonumber(opts.live_upcoming) or 0))
         curl_json(string.format("%s/api/epg/events/grid?channel=%s&limit=%d",
             opts.tvheadend_url, urlencode(uuid), want + 1), function(e)
-            local ev = e and e.entries and e.entries[1]
-            if not ev then return cb(nil) end
-            local upcoming = {}
-            for i = 2, math.min(#e.entries, want + 1) do
-                local nx = e.entries[i]
-                if nx and nx.title and nx.title ~= "" then
-                    upcoming[#upcoming + 1] = { title = nx.title, start = tonumber(nx.start) }
+            if not (e and e.entries) then return cb(nil) end -- fetch/parse failed: keep the prior card
+            local entries = e.entries
+            local now = os.time()
+            local cur -- the programme actually on now (nil = an EPG gap over `now`)
+            for _, ev in ipairs(entries) do
+                local s, st = tonumber(ev.start), tonumber(ev.stop)
+                if s and st and s <= now and now < st then cur = ev; break end
+            end
+            local upcoming = {} -- the future programmes (start > now), capped at `want`
+            for _, ev in ipairs(entries) do
+                if #upcoming >= want then break end
+                local s = tonumber(ev.start)
+                if s and s > now and ev.title and ev.title ~= "" then
+                    upcoming[#upcoming + 1] = { title = ev.title, start = s }
                 end
+            end
+            local channel = (cur and cur.channelName)
+                or (entries[1] and entries[1].channelName) or chan_name
+            if not cur then -- EPG gap: no programme covers now -> channel + upcoming only
+                return cb({
+                    kind = "livetv", source = "TVheadend",
+                    channel = channel, no_epg = true, upcoming = upcoming,
+                })
             end
             cb({
                 kind = "livetv", source = "TVheadend",
-                channel = ev.channelName or chan_name,
-                title = ev.title,
-                subtitle = (ev.subtitle and ev.subtitle ~= "") and ev.subtitle or ev.episodeOnscreen,
-                overview = ev.summary or ev.description,
-                start = tonumber(ev.start), stop = tonumber(ev.stop),
+                channel = channel,
+                title = cur.title,
+                subtitle = (cur.subtitle and cur.subtitle ~= "") and cur.subtitle or cur.episodeOnscreen,
+                overview = cur.summary or cur.description,
+                start = tonumber(cur.start), stop = tonumber(cur.stop),
                 upcoming = upcoming,
             })
         end)
