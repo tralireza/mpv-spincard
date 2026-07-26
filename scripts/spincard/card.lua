@@ -175,10 +175,10 @@ function M.build_card(c)
         if c.no_epg then
             -- No EPG entry covers the current time (a guide gap): mirror the normal
             -- live layout but substitute the channel for the MISSING programme title.
-            -- The channel goes in the title slot (heading) AND stays on its usual cyan
-            -- subline, and "[No program information]" drops into the synopsis slot. A
+            -- The channel goes in the title slot (heading) AND stays on its usual gold
+            -- subline (00D7FF, BGR), and "[No program information]" drops into the synopsis slot. A
             -- countdown bar + the signal / transponder / "Next" list still render below.
-            heading(c.channel or "Live TV", 34, nil, 2)                 -- title slot -> channel
+            heading((c.channel and c.channel ~= "") and c.channel or "Live TV", 34, nil, 2) -- title slot -> channel (guard "")
             if c.channel and c.channel ~= "" then
                 line(ellipsize_px(c.channel, fitw, 24), 24, "00D7FF")   -- channel stays on the subline
             end
@@ -201,7 +201,7 @@ function M.build_card(c)
                 end
             end
         else
-            heading((c.title and c.title ~= "") and c.title or (c.channel or "Live TV"), 34, nil, 2)
+            heading((c.title and c.title ~= "") and c.title or ((c.channel and c.channel ~= "") and c.channel or "Live TV"), 34, nil, 2)
             local sub = c.channel or ""
             if c.subtitle and c.subtitle ~= "" then
                 sub = (sub ~= "" and (sub .. "   \226\128\162   ") or "") .. c.subtitle

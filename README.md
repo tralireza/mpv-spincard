@@ -154,16 +154,16 @@ show_fanart=yes   fanart_opacity=0.25   fanart_pause_only=yes   # dimmed backdro
 show_logo=yes     logo_height=0.12
 remote_art=yes    # fetch poster/fanart/clearlogo from TMDB when there's no local file (cached to disk)
 show_disc=yes     disc_size=0.22
-disc_spin=yes     disc_spin_secs=2.5   disc_spin_frames=96
+disc_spin=yes     disc_spin_secs=5   disc_spin_frames=96
 show_banner=yes   banner_height=0.10   # wide banner.jpg top-left (if present)
 show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
 overview_scroll=yes  overview_lines=4  overview_scroll_secs=3   # scrolling synopsis
-cast_headshots=no  casthead_style=scroll  casthead_max=10  casthead_height=0.12   # cast photo strip (scroll marquee | static row)
+cast_headshots=no  casthead_style=scroll  casthead_max=10  casthead_height=0.19   # cast photo strip (scroll marquee | static row)
 
 enrich=yes   api_key=   omdb_api_key=   language=en-US   # TMDB + OMDb (optional; empty = local only)
 rating_ttl=3600                          # refresh IMDb/TMDB ratings when older than this (s); 0 = off
 tvheadend_url=                           # live-TV EPG (e.g. http://127.0.0.1:9981)
-live_upcoming=3                          # live TV: "Up next" programmes to list (0 = none)
+live_upcoming=7                          # live TV: "Up next" programmes to list (0 = none)
 ```
 
 ## Library layout (Kodi / Emby)
