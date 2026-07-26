@@ -48,11 +48,13 @@ function M.build_card(c)
     local cast_scroll_idx = deps.cast_idx()
     local overview_scroll_idx = deps.overview_idx()
     local upnext_scroll_idx = deps.upnext_idx()
+    -- the cast-headshot strip (a desktop overlay) replaces the text cast when active;
+    -- getter may be absent in a headless test stub, so guard it.
+    local casthead_active = deps.casthead_active and deps.casthead_active()
     local logo_rect, card_rect
     local x, y, pad = opts.pos_x, opts.pos_y, layout.PAD
-    if c.has_disc then -- leave room for the disc's left half at the top-left corner
-        x = math.max(x, math.floor(opts.disc_size * RES_Y / 2) + 8)
-    end
+    -- the disc now nestles at the card's TOP-RIGHT corner (pokes out to the right),
+    -- so the card no longer needs the old left-margin push for it.
     local bw, content, cy = layout.CARD_W, {}, y + pad
     local innerw = bw - 2 * pad
     -- text_w over-estimates the OSD sans (~0.6*fs/glyph vs the real ~0.5), so
@@ -483,7 +485,7 @@ function M.build_card(c)
     -- single line gliding left; ="vertical" → a fixed cast_lines×cast_cols grid
     -- scrolled a row at a time; cast_scroll off → comma-packed onto ≤2 rows. The
     -- scrolling layouts read cast_scroll_idx (stepped on a timer in show()).
-    if c.cast and #c.cast > 0 then
+    if c.cast and #c.cast > 0 and not casthead_active then
         local fs = tonumber(opts.cast_fs) or 21
         local cbold = opts.cast_bold ~= false
         local nmax = math.max(1, tonumber(opts.cast_max) or 5)

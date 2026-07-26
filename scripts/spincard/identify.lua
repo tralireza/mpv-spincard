@@ -83,23 +83,6 @@ local function find_year(s)
     return ypos, yval
 end
 
--- Detect "NxNN" (e.g. 3x07) with non-digit boundaries, so it can't match a
--- resolution like 1920x1080.
-local function find_nxnn(s)
-    local from = 1
-    while true do
-        local a, b, se, ep = s:find("(%d%d?)x(%d%d?)", from)
-        if not a then break end
-        local before = (a > 1) and s:sub(a - 1, a - 1) or " "
-        local after = (b < #s) and s:sub(b + 1, b + 1) or " "
-        if not before:match("%d") and not after:match("%d") then
-            return a, tonumber(se), tonumber(ep)
-        end
-        from = b + 1
-    end
-    return nil
-end
-
 function M.identify(path)
     path = path or ""
     local fname = path:match("[^/\\]+$") or path
@@ -113,16 +96,16 @@ function M.identify(path)
     local is_tv_path = lpath:find("/tv/") ~= nil or lpath:find("/tv[ _%-]?shows?/") ~= nil
         or lpath:find("/series/") ~= nil
 
-    -- ---- TV: SxxExx is definitive (any path); NxNN is a fallback, and is
-    --         ignored under a Movies path so it can't misfire on a film. A TV
-    --         folder alone is enough to classify (show-level, no S/E). --------
+    -- ---- TV: the ONLY season/episode marker is the universal de-facto SxxEyy —
+    --         literal S and E, each followed by ALWAYS TWO digits (S01E01, S12E34).
+    --         Anything else — an "x" separator (NxNN), a single digit (s1e1), or a
+    --         stray number in a word (a72x7t) — is NOT the format and is left as-is
+    --         (so tmp.A72x7t.mp4 is never read as S72E07). A /TV/ folder still
+    --         classifies the file as a (show-level) TV item, just with no S/E. ------
     local cut, season, episode = nil, nil, nil
-    local i1, _, se, ep = s:find("s(%d%d?)e(%d%d?)")
+    local i1, _, se, ep = s:find("s(%d%d)e(%d%d)")
     if i1 then
         cut, season, episode = i1, tonumber(se), tonumber(ep)
-    elseif not is_movie_path then
-        local a, s2, e2 = find_nxnn(s)
-        if a then cut, season, episode = a, s2, e2 end
     end
 
     if cut or is_tv_path then

@@ -40,8 +40,8 @@ local opts = {
     duration  = 7,         -- auto-show-on-open timeout (0 = stay until toggled)
     toggle_timeout = 17,   -- toggle-key auto-close timeout (0 = stay until toggled)
     key       = "",        -- default toggle key ("" = bind via input.conf)
-    pos_x     = 40,
-    pos_y     = 40,     -- margin from the top OR bottom edge (see anchor)
+    pos_x     = 22,     -- left margin (virtual px) — ~3% on 16:9, matches the banner inset
+    pos_y     = 22,     -- margin from the top OR bottom edge (see anchor); ~3%, matches the banner
     anchor    = "bottom", -- "bottom" (hug bottom, grow up) or "top"
     enrich    = true,      -- look up online metadata (needs api_key)
     api_key   = "",        -- TMDB API key; empty => filename-only card
@@ -86,11 +86,16 @@ local opts = {
     cast_cols     = 2,      -- cast entries per row, vertical style (2nd col starts at card middle)
     cast_fs       = 21,     -- cast font size (body tier: matches genre/synopsis/meta)
     cast_bold     = true,   -- cast in bold
+    cast_headshots = false, -- desktop strip of TMDB cast profile photos (top-left, under the banner); TMDB-only, needs api_key + network
+    casthead_style = "scroll", -- "scroll" = right→left marquee of all cast faces w/ name+role labels | "static" = fixed row of the faces that fit. Both replace the card's text cast.
+    casthead_max  = 10,     -- max headshots fetched for the strip (scroll shows up to this; static draws what fits ~6). Raise/lower to taste
+    casthead_height = 0.12, -- headshot height as a fraction of the video height
     overview_scroll = true, -- scroll the synopsis through a fixed overview_lines window
     overview_scroll_secs = 3,-- seconds between synopsis scroll steps (0 = don't advance)
     overview_scroll_delay = 3,-- seconds to hold the first synopsis window before scrolling (read the opening line)
     overview_lines = 4,     -- synopsis viewport height (lines)
     nfo_supplement = true,  -- fill a local .nfo's MISSING fields (cast/genres/…) from TMDB (needs api_key)
+    force_remote  = false,  -- TESTING: ignore the local .nfo + disk caches and always re-query TMDB/OMDb fresh
     region        = "",     -- certification region (e.g. GB, US); "" => derive from `language`
 }
 options.read_options(opts, "spincard")
@@ -112,7 +117,7 @@ local omdb_fetch_rating = omdb.fetch_rating
 local tvh_fetch, tvh_signal = tvheadend.tvh_fetch, tvheadend.tvh_signal
 
 local RES_X, RES_Y = layout.RES_X, layout.RES_Y
-local CARD_VER = 4 -- disk-card schema; a cached card below this is refetched once
+local CARD_VER = 6 -- disk-card schema; a cached card below this is refetched once (v6: wider cast pool for the scrolling headshot strip)
                    -- so pre-v2 caches (no cast/genres/…) auto-upgrade on next play
 
 local overlay = mp.create_osd_overlay("ass-events")
@@ -131,6 +136,7 @@ local anim_fade, refresh_timer = 1, nil -- anim_fade stays 1 (fades disabled)
 local cast_scroll_idx, cast_scroll_timer = 0, nil -- cast marquee window offset + timer
 local overview_scroll_idx, overview_scroll_timer = 0, nil -- synopsis marquee offset + timer
 local upnext_scroll_idx, upnext_scroll_timer = 0, nil -- live-TV "Up next" marquee offset + timer
+local casthead_active = false -- cast-headshot strip is showing → build_card drops the text cast
 local current_gen = 0
 local render, show, hide, toggle   -- forward declarations
 local gather_tech = tech.gather_tech -- reads live mpv props → tech table (tech.lua)
@@ -144,6 +150,7 @@ card.init(opts, {
     cast_idx     = function() return cast_scroll_idx end,
     overview_idx = function() return overview_scroll_idx end,
     upnext_idx   = function() return upnext_scroll_idx end,
+    casthead_active = function() return casthead_active end,
     tech         = function() if cur_tech == nil then cur_tech = gather_tech() end return cur_tech end,
 })
 
@@ -249,6 +256,7 @@ hide = function()
     img_remove(clearlogo)
     disc_spin_stop()
     img_remove(disc)
+    images.casthead_hide()
     visible = false
     msg.verbose("hide")
 end
@@ -268,6 +276,7 @@ show = function(timeout)
         if not visible then return end
         poster_show()
         banner_show()
+        images.casthead_show()
         disc_spin_start()
     end)
 
@@ -366,6 +375,7 @@ local function on_file_loaded()
     local gen = current_gen
     cur_signal = nil -- new file: drop any prior tuner reading (a fresh channel re-polls)
     cur_tech = nil   -- new file: re-read tech (resolution/codecs/…) on the next render
+    casthead_active = false; images.casthead_hide() -- clear any prior cast-headshot strip
     content_ok = is_video_playback()
     if not content_ok then live_ctx = nil; hide(); return end -- no card for images / audio
     local path = mp.get_property("path") or mp.get_property("filename") or ""
@@ -420,8 +430,10 @@ local function on_file_loaded()
     end
 
     -- Pick the metadata source: local .nfo (primary) -> cache -> filename.
+    -- force_remote (a testing flag) bypasses the .nfo AND the disk caches so every
+    -- load re-queries TMDB/OMDb fresh (the img cache still applies — images don't change).
     local do_tmdb = false
-    local localc = read_local(path)
+    local localc = (not opts.force_remote) and read_local(path) or nil
     if localc then
         localc.season = localc.season or id.season
         localc.episode = localc.episode or id.episode
@@ -430,7 +442,7 @@ local function on_file_loaded()
         msg.verbose("local .nfo: '" .. tostring(localc.title) .. "'"
             .. (poster_path and " [poster]" or ""))
     else
-        local cached = cache_get(id.cachekey)
+        local cached = (not opts.force_remote) and cache_get(id.cachekey) or nil
         cur_card = merged(cached or {
             kind = id.kind, title = id.display, year = id.year,
             season = id.season, episode = id.episode, source = "file",
@@ -462,7 +474,8 @@ local function on_file_loaded()
     local do_rating = false
     if opts.enrich and opts.api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0
         and id.kind ~= "unknown" then
-        local rv, rt = rating_get(id.cachekey)
+        local rv, rt
+        if not opts.force_remote then rv, rt = rating_get(id.cachekey) end
         if rv then cur_card.rating, cur_card.rating_src = rv, "TMDB" end
         if not do_tmdb and rating_stale(rt) then do_rating = true end
     end
@@ -474,7 +487,8 @@ local function on_file_loaded()
     local do_imdb = false
     if opts.enrich and opts.omdb_api_key ~= "" and (tonumber(opts.rating_ttl) or 0) > 0
         and id.kind ~= "unknown" then
-        local iv, it, ix = imdb_rating_get(id.cachekey)
+        local iv, it, ix
+        if not opts.force_remote then iv, it, ix = imdb_rating_get(id.cachekey) end
         if iv then
             cur_card.rating_imdb, cur_card.rating_imdb_votes = iv, ix and ix.votes
             if ix then
@@ -483,6 +497,7 @@ local function on_file_loaded()
             end
         end
         -- refetch when stale OR when the cached entry predates the extras schema
+        -- (force_remote leaves it/ix nil → rating_stale(nil) is true → always refetch)
         if rating_stale(it) or (ix and ix._old) then do_imdb = true end
     end
     local imdb_fired = false
@@ -636,6 +651,66 @@ local function on_file_loaded()
     -- TMDB paths; fresh fetches trigger it again from the do_tmdb callback below).
     fetch_remote_art(gen)
 
+    -- Cast-headshot strip: drop the text cast (set active synchronously to avoid a
+    -- text→heads flash) and prepare the row; the async prepare draws the heads, or
+    -- clears active if none decode. Re-fired from the do_tmdb callback once fresh
+    -- cast arrives. Two sources of profile paths:
+    --   • a TMDB card carries them on cast[].profile directly;
+    --   • an .nfo card has cast names but no profiles → merge TMDB profile_path onto
+    --     them by name (a cached name→profile map under castprofiles/<key>).
+    local function prepare_heads(g)
+        casthead_active = true -- strip is showing → drop the card's text cast (both styles)
+        images.casthead_prepare(cur_card.cast, g, function(count)
+            if g ~= current_gen then return end
+            if count > 0 then
+                if visible then images.casthead_show() end
+            else
+                casthead_active = false
+                if visible then render() end -- no faces decoded → restore the text cast
+            end
+        end)
+    end
+    local function fire_casthead(g)
+        if not (opts.cast_headshots and cur_card and cur_card.kind ~= "livetv"
+            and type(cur_card.cast) == "table" and #cur_card.cast > 0) then
+            casthead_active = false; images.casthead_hide(); return
+        end
+        for _, e in ipairs(cur_card.cast) do -- already have profiles (TMDB card)?
+            if type(e) == "table" and e.profile and e.profile ~= "" then return prepare_heads(g) end
+        end
+        -- .nfo card: no profiles → merge TMDB profile_path onto the cast by name.
+        if opts.api_key == "" then casthead_active = false; images.casthead_hide(); return end
+        casthead_active = true -- optimistic: drop the text cast during the merge (both styles)
+        local function apply(map)
+            local any = false
+            for _, e in ipairs(cur_card.cast) do
+                if type(e) == "table" and e.name and not e.profile then
+                    local p = map[e.name:lower()]
+                    if p then e.profile, any = p, true end
+                end
+            end
+            if any then prepare_heads(g)
+            else casthead_active = false; if visible then render() end end -- no name matched
+        end
+        local cm = (not opts.force_remote) and cache_get("castprofiles/" .. id.cachekey) or nil
+        if type(cm) == "table" then return apply(cm) end
+        tmdb_fetch(id, function(card) -- search-based fetch just to harvest cast profiles
+            if not card then if g == current_gen then apply({}) end; return end
+            local map = {}
+            if type(card.cast) == "table" then
+                for _, e in ipairs(card.cast) do
+                    if type(e) == "table" and e.name and e.profile and e.profile ~= "" then
+                        map[e.name:lower()] = e.profile
+                    end
+                end
+            end
+            cache_put("castprofiles/" .. id.cachekey, map) -- persist (before the gen guard)
+            if g ~= current_gen then return end
+            apply(map)
+        end)
+    end
+    fire_casthead(gen)
+
     if opts.auto_show then show(opts.duration) end
 
     -- Fire the IMDb rating lookup: now if we already hold a tconst (.nfo/cache) or
@@ -669,6 +744,7 @@ local function on_file_loaded()
             end
             if do_imdb then fire_imdb(gen) end -- now cur_card.imdb_id (external_ids) is set, else title
             fetch_remote_art(gen)              -- now cur_card carries the TMDB art paths
+            fire_casthead(gen)                 -- now cur_card.cast carries TMDB profile paths
             if visible then render() end
         end)
     else
@@ -723,6 +799,8 @@ mp.register_event("shutdown", function()
     os.remove(banner.file)
     os.remove(clearlogo.file)
     os.remove(disc.file)
+    for i = 1, #images.casthead.ids do os.remove(images.casthead.base .. i .. ".bgra") end
+    os.remove(images.casthead.packed.file) -- scrolling-strip packed BGRA
 end)
 
 -- Single pause observer: (1) with show_on_pause, pop the card on pause (sticky) and
@@ -759,6 +837,7 @@ mp.observe_property("osd-width", "number", function(_, w)
         if banner.ready then banner_show() end
         if clearlogo.ready then place_logo() end
         if disc.ready then disc_show() end
+        if opts.cast_headshots and images.casthead_ready() then images.casthead_show() end -- both styles (scroll doesn't set casthead_active)
     end
 end)
 

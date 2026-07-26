@@ -66,15 +66,21 @@ local function parse_details(kind, d)
             local cast = {}
             for _, p in ipairs(cr.cast) do cast[#cast + 1] = p end
             table.sort(cast, function(a, b) return (a.order or 999) < (b.order or 999) end)
-            -- keep only the top cast_max (already order-sorted) so the cached JSON
-            -- isn't bloated with 30+ people build_card never shows. Trade-off: raising
-            -- cast_max later needs a refetch (clear the cache) to pull more.
-            local nmax = math.max(1, tonumber(opts.cast_max) or 5)
+            -- keep the top max(cast_max, casthead_max) (already order-sorted) so the
+            -- cached JSON isn't bloated with 30+ people build_card never shows, yet the
+            -- scrolling headshot strip (casthead_style=scroll) has its full pool. Trade-off:
+            -- raising either cap later needs a refetch (clear the cache) to pull more.
+            local nmax = math.max(1, tonumber(opts.cast_max) or 5, tonumber(opts.casthead_max) or 5)
             local out_cast = {}
             for _, p in ipairs(cast) do
                 if p.name and p.name ~= "" then
-                    out_cast[#out_cast + 1] =
-                        { name = p.name, role = (p.character and p.character ~= "") and p.character or nil }
+                    out_cast[#out_cast + 1] = {
+                        name = p.name,
+                        role = (p.character and p.character ~= "") and p.character or nil,
+                        -- profile_path (headshot) for the cast-headshots strip; TMDB
+                        -- returns it in the credits block. Just the path, like poster/logo.
+                        profile = (p.profile_path and p.profile_path ~= "") and p.profile_path or nil,
+                    }
                     if #out_cast >= nmax then break end
                 end
             end

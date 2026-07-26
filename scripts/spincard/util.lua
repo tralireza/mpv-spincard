@@ -298,11 +298,13 @@ end
 -- rather than slicing mid-token; a separator-less run is hard-cut. Used for the
 -- "unknown" card's raw file name, where wrapping a long dotted name reads poorly.
 local ELLIPSIS = "\226\128\166" -- …
-function M.ellipsize_px(text, maxw, fs)
+-- marker: the truncation suffix (default "…"); pass e.g. "-" for a tighter cut.
+function M.ellipsize_px(text, maxw, fs, marker)
+    marker = marker or ELLIPSIS
     if text_w(text, fs) <= maxw then return text end
     local chars = utf8_chars(text)
     local line, lastsep, linew = {}, nil, 0
-    local ellipw = text_w(ELLIPSIS, 1) -- ellipsis width in fs=1 units
+    local ellipw = text_w(marker, 1) -- marker width in fs=1 units
     for _, ch in ipairs(chars) do
         line[#line + 1] = ch
         linew = linew + text_w(ch, 1) -- fs=1 units; *fs in the compare == text_w(line, fs)
@@ -316,7 +318,7 @@ function M.ellipsize_px(text, maxw, fs)
             break
         end
     end
-    return (table.concat(line):gsub("[%s._/,%-]+$", "")) .. ELLIPSIS -- trim trailing seps
+    return (table.concat(line):gsub("[%s._/,%-]+$", "")) .. marker -- trim trailing seps
 end
 
 return M
