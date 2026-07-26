@@ -615,7 +615,7 @@ local function casthead_window()
     local sx = ow / RES_X
     local margin = math.floor(oh * 0.03)
     local face_h = casthead.packed.face_h or casthead.packed.h
-    local face_disp = math.floor(oh * (tonumber(opts.casthead_height) or 0.12))
+    local face_disp = math.floor(oh * (tonumber(opts.casthead_height) or 0.19))
     local scale = face_disp / face_h                    -- faces at casthead_height
     local dh = math.floor(casthead.packed.h * scale)    -- overlay height = faces + baked shadow band
     local gap = math.max(4, math.floor(face_disp * 0.16))
@@ -693,13 +693,11 @@ local function casthead_labels_draw(x0, y0, scale, o, W_disp)
             if dx >= x0 and dx <= right then
                 local L = labels[i]
                 local function e(t) return util.ass_escape(util.ellipsize_px(t, wv, fs, "-")) end
-                -- name on TWO lines (first / rest) — most names don't fit one narrow line —
-                -- then the role as (…) on a 3rd, dimmer line. Truncation marker is "-".
-                local nm = L.name or ""
-                local first, rest = nm:match("^(%S+)%s+(.+)$")
-                local txt = first and (e(first) .. "\\N" .. e(rest)) or e(nm)
+                -- name on ONE line (ellipsised to the cell), then the role on a
+                -- 2nd, dimmer line (no parens). Truncation marker is "-".
+                local txt = e(L.name or "")
                 if L.role and L.role ~= "" then
-                    txt = txt .. "\\N{\\1c&HC8C8C8&}" .. e("(" .. L.role .. ")")
+                    txt = txt .. "\\N{\\1c&HC8C8C8&}" .. e(L.role)
                 end
                 ev[#ev + 1] = string.format(
                     "{\\an8%s\\pos(%d,%d)\\bord2\\shad1\\3c&H000000&\\1c&HFFFFFF&\\fs%d\\b1}%s",
@@ -793,7 +791,7 @@ function M.casthead_show()
     if #heads == 0 then return end
     local sx, sy = ow / RES_X, oh / RES_Y
     local margin = math.floor(oh * 0.03)
-    local dh = math.floor(oh * (tonumber(opts.casthead_height) or 0.10))
+    local dh = math.floor(oh * (tonumber(opts.casthead_height) or 0.19))
     local gap = math.max(4, math.floor(dh * 0.16))
     local y0 = margin
     if opts.show_banner and banner.ready then -- sit under the banner when it's shown
@@ -819,12 +817,9 @@ function M.casthead_show()
             local cxv = (x + dw / 2) / sx
             local yv = (y0 + dh + math.floor(oh * 0.008)) / sy
             local wv = dw / sx
-            -- two lines: first name on top, the rest (surname) below — reads better
-            -- than one truncated line under a narrow head. Each line ellipsised to
-            -- the head width; a single-word name stays one line.
+            -- name on one line, ellipsised to the head width.
             local function esc(t) return util.ass_escape(util.ellipsize_px(t, wv, 16)) end
-            local first, rest = h.name:match("^(%S+)%s+(.+)$")
-            local label = first and (esc(first) .. "\\N" .. esc(rest)) or esc(h.name)
+            local label = esc(h.name)
             events[#events + 1] = string.format(
                 "{\\an8\\pos(%d,%d)\\bord2\\shad1\\3c&H000000&\\1c&HFFFFFF&\\fs16\\b1}%s",
                 math.floor(cxv), math.floor(yv), label)

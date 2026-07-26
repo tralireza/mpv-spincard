@@ -14,7 +14,7 @@ unless you add its key.
 
 ![spincard — Waterworld: a top-left scrolling cast-headshot strip with names and roles, local banner and clearlogo title, poster and a spinning disc, an IMDb · Rotten Tomatoes · Metacritic · TMDB rating row, awards, box office, genres, scrolling plot and tier-coloured tech pills](docs/screenshots/spindisc.png)
 
-![spincard — Avatar: Fire and Ash: a scrolling cast-headshot strip, plus TMDB-hosted clearlogo, poster and fanart with no local artwork, an IMDb · Rotten Tomatoes · Metacritic · TMDB rating row, "Won 1 Oscar", box office, genres above a scrolling plot](docs/screenshots/movie.png)
+![spincard — Mechanic: Resurrection: a scrolling cast-headshot strip, plus TMDB-hosted clearlogo, poster and fanart with no local artwork, an IMDb · Rotten Tomatoes · Metacritic · TMDB rating row, a nomination, box office, genres above a scrolling plot](docs/screenshots/movie.png)
 
 ![spincard — Breaking Bad TV episode card: a scrolling cast-headshot strip (profiles merged onto the .nfo cast), banner and clearlogo, S04E01 season progress, IMDb and TMDB rating, air date, genres and plot](docs/screenshots/tv.png)
 
