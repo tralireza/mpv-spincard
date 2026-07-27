@@ -86,10 +86,12 @@ local opts = {
     cast_cols     = 2,      -- cast entries per row, vertical style (2nd col starts at card middle)
     cast_fs       = 21,     -- cast font size (body tier: matches genre/synopsis/meta)
     cast_bold     = true,   -- cast in bold
-    cast_headshots = false, -- desktop strip of TMDB cast profile photos (top-left, under the banner); TMDB-only, needs api_key + network
+    cast_headshots = false, -- desktop strip of TMDB cast profile photos (top-left; over the banner by default, see casthead_over_banner); TMDB-only, needs api_key + network
     casthead_style = "scroll", -- "scroll" = right→left marquee of all cast faces w/ name+role labels | "static" = fixed row of the faces that fit. Both replace the card's text cast.
     casthead_max  = 10,     -- max headshots fetched for the strip (scroll shows up to this; static draws what fits ~3). Raise/lower to taste
     casthead_height = 0.19, -- headshot height as a fraction of the video height
+    casthead_over_banner = true, -- draw the strip at the top OVER the banner (banner stays behind); off = sit under the banner
+    casthead_over_banner_inset = 0.25, -- when over the banner, inset the strip's top-left corner down+right by this fraction of the banner's drawn height, so the banner's top strip stays visible
     overview_scroll = true, -- scroll the synopsis through a fixed overview_lines window
     overview_scroll_secs = 3,-- seconds between synopsis scroll steps (0 = don't advance)
     overview_scroll_delay = 3,-- seconds to hold the first synopsis window before scrolling (read the opening line)

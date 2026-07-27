@@ -606,9 +606,10 @@ function M.casthead_hide()
 end
 
 -- SCROLL style helpers -----------------------------------------------------
--- Window geometry (OSD px): top-left, under the banner, spanning from the left
--- margin to just before the top-right poster. Returns x0,y0,dh,scale,W_src (the
--- window width in packed-source px). nil until the OSD is sized and the row is built.
+-- Window geometry (OSD px): top-left, spanning from the left margin to just before
+-- the top-right poster. Sits over the banner (casthead_over_banner, default) or
+-- under it. Returns x0,y0,dh,scale,W_src (the window width in packed-source px).
+-- nil until the OSD is sized and the row is built.
 local function casthead_window()
     local ow, oh = mp.get_osd_size()
     if not ow or ow == 0 or not oh or oh == 0 or not casthead.packed.ready then return nil end
@@ -619,9 +620,19 @@ local function casthead_window()
     local scale = face_disp / face_h                    -- faces at casthead_height
     local dh = math.floor(casthead.packed.h * scale)    -- overlay height = faces + baked shadow band
     local gap = math.max(4, math.floor(face_disp * 0.16))
-    local y0 = margin
-    if opts.show_banner and banner.ready then -- sit under the banner when it's shown
-        y0 = margin + math.floor(oh * opts.banner_height) + gap
+    local x0, y0 = margin, margin
+    if opts.show_banner and banner.ready then
+        if opts.casthead_over_banner then
+            -- inset the strip's top-left corner INTO the banner (down + right) so the
+            -- banner's top edge stays visible as a strip: the inset reveals
+            -- casthead_over_banner_inset of the banner's drawn height (faces are a
+            -- higher overlay id, so they still draw over the rest of the banner)
+            local inset = math.floor(oh * opts.banner_height
+                * (tonumber(opts.casthead_over_banner_inset) or 0.25))
+            x0, y0 = margin + inset, margin + inset
+        else -- sit under the banner when it's shown
+            y0 = margin + math.floor(oh * opts.banner_height) + gap
+        end
     end
     -- Span the full CARD width: from the left margin (≈ the card's left edge) to the
     -- card's RIGHT edge, where the spinning disc sits — so the marquee runs right up
@@ -646,8 +657,8 @@ local function casthead_window()
         local pl = ow - pdw - math.floor(oh * (tonumber(opts.poster_margin) or 0))
         right = math.min(right, pl - pad)
     end
-    local W_disp = math.max(face_disp, right - margin)
-    return margin, y0, dh, scale, math.max(1, math.floor(W_disp / scale))
+    local W_disp = math.max(face_disp, right - x0)
+    return x0, y0, dh, scale, math.max(1, math.floor(W_disp / scale))
 end
 
 -- Draw the marquee: a W_src-wide vertical slice of the packed row at byte offset o
@@ -772,8 +783,9 @@ function M.casthead_scroll_show()
     if x0 and casthead.packed.w > W_src then M.casthead_scroll_start() else M.casthead_scroll_stop() end
 end
 
--- STATIC style: draw the ready heads left→right, top-left, under the banner if
--- present; cap the row to ~42% of the width so it clears the top-right poster.
+-- STATIC style: draw the ready heads left→right, top-left; over the banner
+-- (casthead_over_banner, default) or under it if present; cap the row to ~42% of
+-- the width so it clears the top-right poster.
 -- Names go on a 2nd osd-overlay in the 1280x720 virtual space (head OSD-px → /sx,/sy).
 function M.casthead_show()
     if not opts.cast_headshots then return end
@@ -793,15 +805,23 @@ function M.casthead_show()
     local margin = math.floor(oh * 0.03)
     local dh = math.floor(oh * (tonumber(opts.casthead_height) or 0.19))
     local gap = math.max(4, math.floor(dh * 0.16))
-    local y0 = margin
-    if opts.show_banner and banner.ready then -- sit under the banner when it's shown
-        y0 = margin + math.floor(oh * opts.banner_height) + gap
+    local x0, y0 = margin, margin
+    if opts.show_banner and banner.ready then
+        if opts.casthead_over_banner then
+            -- inset the strip's top-left corner INTO the banner (down + right) so the
+            -- banner's top edge stays visible as a strip (see casthead_window)
+            local inset = math.floor(oh * opts.banner_height
+                * (tonumber(opts.casthead_over_banner_inset) or 0.25))
+            x0, y0 = margin + inset, margin + inset
+        else -- sit under the banner when it's shown
+            y0 = margin + math.floor(oh * opts.banner_height) + gap
+        end
     end
     local maxw = math.floor(ow * 0.42) -- keep clear of the top-right poster
-    local x, drawn, events = margin, 0, {}
+    local x, drawn, events = x0, 0, {}
     for _, h in ipairs(heads) do
         local dw = math.floor(h.w * (dh / h.h)) -- square → dw == dh
-        if drawn > 0 and (x + dw - margin) > maxw then break end -- no room; stop the row
+        if drawn > 0 and (x + dw - x0) > maxw then break end -- no room; stop the row
         mp.command_native({ name = "overlay-add", id = casthead.ids[drawn + 1], x = x, y = y0,
             file = h.file, offset = 0, fmt = "bgra",
             w = h.w, h = h.h, stride = h.w * 4, dw = dw, dh = dh })
