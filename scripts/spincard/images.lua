@@ -562,8 +562,9 @@ function M.casthead_prepare(cast, token, cb)
     casthead.packed.ready = false
     casthead.scroll_idx = 0
     local scroll = (tostring(opts.casthead_style or "static"):lower() == "scroll")
-    -- scroll shows up to casthead_max faces; static is also bounded by the overlay-id block
-    local cap = math.max(1, tonumber(opts.casthead_max) or 5)
+    -- scroll shows up to casthead_max faces (0 = all); static is also bounded by the
+    -- overlay-id block, so its cap stays #casthead.ids even when casthead_max is 0.
+    local cap = util.cap_or_all(opts.casthead_max, 5)
     local nmax = scroll and cap or math.min(#casthead.ids, cap)
     local picks = {}
     for _, e in ipairs(cast or {}) do

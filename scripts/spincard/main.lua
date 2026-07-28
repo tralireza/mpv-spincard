@@ -47,6 +47,7 @@ local opts = {
     api_key   = "",        -- TMDB API key; empty => filename-only card
     language  = "en-US",   -- TMDB response language
     rating_ttl = 3600,     -- refresh rating from TMDB when the cached value is older than this (s); 0 = off
+    enrich_ttl_days = 7,   -- refresh the cached card + .nfo supplement when older than this (days); 0 = never (version-only). Stale-while-revalidate: cached shows first, refetch updates it
     omdb_api_key = "",     -- OMDb API key for the IMDb rating; empty => IMDb source off (shown alongside TMDB when both keys set)
     imdb_votes = true,     -- show the IMDb vote count next to the rating (e.g. 8.1 (1.2M))
     tvheadend_url = "",    -- e.g. http://127.0.0.1:9981 — live-TV EPG source ("" = off)
@@ -88,7 +89,7 @@ local opts = {
     cast_bold     = true,   -- cast in bold
     cast_headshots = false, -- desktop strip of TMDB cast profile photos (top-left; over the banner by default, see casthead_over_banner); TMDB-only, needs api_key + network
     casthead_style = "scroll", -- "scroll" = right→left marquee of all cast faces w/ name+role labels | "static" = fixed row of the faces that fit. Both replace the card's text cast.
-    casthead_max  = 10,     -- max headshots fetched for the strip (scroll shows up to this; static draws what fits ~3). Raise/lower to taste
+    casthead_max  = 10,     -- max headshots fetched for the strip (scroll shows up to this; static draws what fits ~3). 0 = all cast. Raise/lower to taste
     casthead_height = 0.19, -- headshot height as a fraction of the video height
     casthead_over_banner = true, -- draw the strip at the top OVER the banner (banner stays behind); off = sit under the banner
     casthead_over_banner_inset = 0.25, -- when over the banner, inset the strip's top-left corner down+right by this fraction of the banner's drawn height, so the banner's top strip stays visible
@@ -450,9 +451,13 @@ local function on_file_loaded()
             season = id.season, episode = id.episode, source = "file",
         })
         if cached then cur_card.rating_src = "TMDB" end
-        -- refetch when there's no cache, or the cache predates the current schema
-        -- (so old sparse cards pick up cast/genres/studio/… once).
-        local stale_cache = cached and (tonumber(cached._v) or 1) < CARD_VER
+        -- refetch when there's no cache, the cache predates the current schema (so old
+        -- sparse cards pick up cast/genres/studio/… once), or it's older than
+        -- enrich_ttl_days (freshness TTL — stale-while-revalidate: the cached card shows
+        -- now, this refetch updates it in the background). Same age gate as cache.fill_missing.
+        local ttl = (tonumber(opts.enrich_ttl_days) or 0) * 86400
+        local stale_cache = cached and ((tonumber(cached._v) or 1) < CARD_VER
+            or (ttl > 0 and os.time() - (tonumber(cached._t) or 0) >= ttl))
         do_tmdb = (not cached or stale_cache)
             and opts.enrich and opts.api_key ~= "" and id.kind ~= "unknown"
         msg.verbose(string.format("identified %s: '%s'%s%s", id.kind, id.query or id.display or "",
@@ -466,8 +471,8 @@ local function on_file_loaded()
     local do_supp = false
     if localc and opts.enrich and opts.api_key ~= "" and id.kind ~= "unknown"
         and opts.nfo_supplement and nfo_missing(localc) then
-        local extra = cache_get("extra/" .. id.cachekey)
-        if extra then fill_missing(cur_card, extra) else do_supp = true end
+        -- fill_missing returns false for a missing OR stale-version supplement → refetch
+        if not fill_missing(cur_card, cache_get("extra/" .. id.cachekey)) then do_supp = true end
     end
 
     -- Rating is a dynamic property: show the freshest cached rating now
@@ -726,7 +731,7 @@ local function on_file_loaded()
     if do_tmdb then
         tmdb_fetch(id, function(card)
             if not card then return end
-            card._v = CARD_VER
+            card._v, card._t = CARD_VER, os.time() -- schema version + write time (freshness TTL)
             cache_put(id.cachekey, card)
             rating_put(id.cachekey, card.rating) -- seed the dynamic rating cache
             if gen ~= current_gen then return end

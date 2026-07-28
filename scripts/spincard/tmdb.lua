@@ -68,9 +68,11 @@ local function parse_details(kind, d)
             table.sort(cast, function(a, b) return (a.order or 999) < (b.order or 999) end)
             -- keep the top max(cast_max, casthead_max) (already order-sorted) so the
             -- cached JSON isn't bloated with 30+ people build_card never shows, yet the
-            -- scrolling headshot strip (casthead_style=scroll) has its full pool. Trade-off:
-            -- raising either cap later needs a refetch (clear the cache) to pull more.
-            local nmax = math.max(1, tonumber(opts.cast_max) or 5, tonumber(opts.casthead_max) or 5)
+            -- scrolling headshot strip (casthead_style=scroll) has its full pool.
+            -- casthead_max=0 means "all" (cap_or_all → math.huge → keep every cast).
+            -- Trade-off: raising a cap in the CONF later needs a refetch (clear the cache
+            -- or bump SUPP_VER) to pull more; a code-side policy change bumps SUPP_VER.
+            local nmax = math.max(1, tonumber(opts.cast_max) or 5, util.cap_or_all(opts.casthead_max, 5))
             local out_cast = {}
             for _, p in ipairs(cast) do
                 if p.name and p.name ~= "" then

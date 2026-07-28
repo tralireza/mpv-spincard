@@ -85,6 +85,22 @@ end
 -- "extra/<key>" entry so the local-first .nfo body on disk is never touched.
 local SUPP_FIELDS = { "cast", "genres", "studio", "tagline", "director", "runtime", "mpaa" }
 
+-- Supplement schema version: bump when SUPP_FIELDS or the cast-cap policy changes so
+-- stale entries refetch ONCE (else the extra/ cache — which has no TTL — would keep an
+-- old, smaller cast forever). Existing entries have no _v (treated as 1), so 2 forces
+-- the first refresh. Mirrors IMDB_VER. `_v` is not a SUPP_FIELD, so it never lands on
+-- the card. (v2: cast pool sized by max(cast_max, casthead_max); pre-v2 kept only cast_max.)
+local SUPP_VER = 2
+
+-- Freshness TTL for the enrichment caches (card + .nfo supplement): an entry stamped
+-- with a write time `_t` older than enrich_ttl_days is treated as stale so the caller
+-- refetches — stale-while-revalidate (the cached value still shows immediately). 0 days
+-- = never expire (version-only). The dynamic rating keeps its own faster rating_ttl.
+local function age_stale(t)
+    local ttl = (tonumber(opts.enrich_ttl_days) or 0) * 86400
+    return ttl > 0 and (os.time() - (tonumber(t) or 0)) >= ttl
+end
+
 local function is_empty(v)
     return v == nil or v == "" or (type(v) == "table" and #v == 0)
 end
@@ -92,17 +108,25 @@ function M.nfo_missing(c)
     for _, f in ipairs(SUPP_FIELDS) do if is_empty(c[f]) then return true end end
     return false
 end
--- Fill dst's missing supplementable fields from src; never overwrite a value dst
--- already has (respects local-first — the .nfo stays authoritative).
+-- Fill dst's missing supplementable fields from a cached/fetched supplement `src`,
+-- respecting local-first (never overwrite a value dst already has). Returns true when
+-- src is present, current-version, AND within the freshness TTL (applied); false when
+-- src is nil, an old-version entry, or older than enrich_ttl_days — the caller then
+-- refetches to rebuild it (at the current policy, with a fresh write time).
 function M.fill_missing(dst, src)
+    if type(src) ~= "table" or (tonumber(src._v) or 1) < SUPP_VER or age_stale(src._t) then
+        return false
+    end
     for _, f in ipairs(SUPP_FIELDS) do
         if is_empty(dst[f]) and not is_empty(src[f]) then dst[f] = src[f] end
     end
+    return true
 end
 -- Extract from a fetched card/details only the supplementable fields that `localc`
--- lacked — this is what gets cached under extra/<key>.
+-- lacked — this is what gets cached under extra/<key>. Stamped with the schema version
+-- and a write time (_t) for the freshness TTL.
 function M.pick_supplement(src, localc)
-    local extra = {}
+    local extra = { _v = SUPP_VER, _t = os.time() }
     for _, f in ipairs(SUPP_FIELDS) do
         if is_empty(localc[f]) and not is_empty(src[f]) then extra[f] = src[f] end
     end

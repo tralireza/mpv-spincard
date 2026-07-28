@@ -67,6 +67,14 @@ function M.fmt_votes(n)
     return string.format("%d", n)
 end
 
+-- A numeric cap where 0 means "no cap / all" → returns math.huge (which math.max
+-- absorbs and `#t >= cap` never trips). Negative/invalid falls back to `default`.
+function M.cap_or_all(v, default)
+    local n = tonumber(v)
+    if not n or n < 0 then n = default end
+    return (n == 0) and math.huge or n
+end
+
 function M.chan_label(n)
     if not n then return nil end
     if n == 1 then return "Mono" end
