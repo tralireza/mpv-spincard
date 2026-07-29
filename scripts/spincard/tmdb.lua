@@ -45,6 +45,7 @@ end
 local function parse_details(kind, d)
     local out = {}
     if not d then return out end
+    if d.id then out.id = d.id end -- TMDB id (for the fanart.tv disc/banner lookup)
     if type(d.genres) == "table" then
         local g = {}
         for _, x in ipairs(d.genres) do if x.name and x.name ~= "" then g[#g + 1] = x.name end end

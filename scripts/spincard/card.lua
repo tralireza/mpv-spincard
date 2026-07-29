@@ -39,6 +39,23 @@ local function metric_frac(v, unit)
     return math.max(0, math.min(1, f))
 end
 
+-- Parse a card_aspect spec into a width:height ratio (w/h) for the height ceiling, or
+-- nil to disable the cap. Accepts "phi"/"golden" (φ ≈ 1.618), "W:H" (e.g. "16:9", "3:2",
+-- "1.85:1"), a bare number (the W/H ratio, e.g. 1.85), or "off"/"none"/"0"/"" to turn the
+-- ceiling off. Anything unrecognised falls back to 16:9. The ceiling height is then
+-- CARD_W / ratio (a wider ratio => shorter card; φ ≈ 1.618 is taller than 16:9 = 1.778).
+local function aspect_ratio(spec)
+    if spec == nil then return 16 / 9 end
+    spec = tostring(spec):lower():gsub("%s", "")
+    if spec == "" or spec == "off" or spec == "none" or spec == "0" then return nil end
+    if spec == "phi" or spec == "golden" then return layout.PHI end
+    local w, h = spec:match("^(%d*%.?%d+):(%d*%.?%d+)$")
+    if w then w, h = tonumber(w), tonumber(h); if w and h and h > 0 then return w / h end end
+    local r = tonumber(spec)
+    if r and r > 0 then return r end
+    return 16 / 9
+end
+
 function M.build_card(c)
     if not c then return "" end
     -- snapshot the card state read below into plain locals (via deps getters) so the
@@ -57,6 +74,16 @@ function M.build_card(c)
     -- so the card no longer needs the old left-margin push for it.
     local bw, content, cy = layout.CARD_W, {}, y + pad
     local innerw = bw - 2 * pad
+    -- Card height ceiling. An explicit card_max_height (virtual px) wins; otherwise it's
+    -- derived from card_aspect (a width:height ratio, default 16:9) applied to the fixed
+    -- width: CARD_W / ratio. A card taller than the ceiling trims its one elastic section
+    -- (movie/TV synopsis window / live-TV "Next") so it fits; shorter cards are left
+    -- as-is (no padding). nil => uncapped (card_aspect=off, no px override).
+    local cap = tonumber(opts.card_max_height) or 0
+    if cap <= 0 then
+        local ratio = aspect_ratio(opts.card_aspect)
+        cap = ratio and math.floor(layout.CARD_W / ratio + 0.5) or nil
+    end
     -- text_w over-estimates the OSD sans (~0.6*fs/glyph vs the real ~0.5), so
     -- fitting text to exactly innerw stops ~a word early and leaves empty space on
     -- the right. Fit to this compensated width instead (~1.22x, the measured ratio)
@@ -73,11 +100,13 @@ function M.build_card(c)
     -- A positioned, outlined text run (the card's text primitive). Shared by
     -- line()/put()/txt()/cell(); o = { alpha = <2-hex>, bold, ital } (alpha omitted
     -- => no \alpha tag). Returns the event string; callers append + advance cursors.
+    -- o.an picks the ASS alignment/anchor (default 7 = top-left; pass 9 = top-RIGHT so
+    -- libass right-aligns the text exactly at px — no text_w width estimate / gap).
     local function text_run(px, py, str, fs, color, o)
         local a = (o and o.alpha) and ("\\alpha&H" .. o.alpha .. "&") or ""
         return string.format(
-            "{\\an7\\pos(%d,%d)%s\\bord2\\shad1\\3c&H000000&\\1c&H%s&\\fs%d%s%s}%s",
-            math.floor(px), math.floor(py), a, color, fs,
+            "{\\an%d\\pos(%d,%d)%s\\bord2\\shad1\\3c&H000000&\\1c&H%s&\\fs%d%s%s}%s",
+            (o and o.an) or 7, math.floor(px), math.floor(py), a, color, fs,
             (o and o.bold) and "\\b1" or "", (o and o.ital) and "\\i1" or "", ass_escape(str))
     end
 
@@ -151,18 +180,56 @@ function M.build_card(c)
     -- scroll=false so both stay pixel-identical to the pre-refactor code.
     local function render_overview(text, maxlines, scroll)
         local ofs = 21 -- body tier (matches genre/cast/meta)
-        if scroll then
-            local all = wrap_px(text, fitw, ofs, 999)
-            local pool = #all
-            if pool <= maxlines then
-                for _, ln in ipairs(all) do line(ln, ofs, "C8C8C8") end
-            else
-                local start = overview_scroll_idx % pool
-                for k = 0, maxlines - 1 do line(all[(start + k) % pool + 1], ofs, "C8C8C8") end
-            end
-        else
+        local lineh = math.floor(ofs * 1.25)
+        if not scroll then -- static: wrap to the window and draw
             for _, ln in ipairs(wrap_px(text, fitw, ofs, maxlines)) do line(ln, ofs, "C8C8C8") end
+            return
         end
+        local all = wrap_px(text, fitw, ofs, 999)
+        local pool = #all
+        if pool <= maxlines then -- fits the window: static, nothing to scroll
+            for _, ln in ipairs(all) do line(ln, ofs, "C8C8C8") end
+            return
+        end
+        if tostring(opts.overview_scroll_mode or "smooth"):lower() == "line" then
+            -- legacy: jump a whole wrapped line every overview_scroll_secs (wrapping window)
+            local start = overview_scroll_idx % pool
+            for k = 0, maxlines - 1 do line(all[(start + k) % pool + 1], ofs, "C8C8C8") end
+            return
+        end
+        -- smooth (default): a sawtooth glide with a HOLD at BOTH ends, each = overview_scroll
+        -- _delay. Each cycle: HOLD the top window, glide up until the LAST line reaches the
+        -- window BOTTOM (end fully shown — never blanks), HOLD the end window the same delay,
+        -- then restart at the top. All in tick units (the timer bumps overview_scroll_idx
+        -- every overview_scroll_interval). Each visible line is \pos'd at its exact glided y
+        -- (the codebase avoids ASS \N — its line spacing drifts from lineh). Windowed: only
+        -- the ~maxlines+1 lines in view are emitted.
+        local winh = maxlines * lineh
+        local px = math.max(0.05, tonumber(opts.overview_scroll_px) or 1) -- fractional ok (sub-1px/tick averages via floor)
+        local dist = (pool - maxlines) * lineh     -- glide distance: top -> last line at the window bottom
+        local interval = math.max(0.001, tonumber(opts.overview_scroll_interval) or 0.1)
+        local hold = math.floor(math.max(0, tonumber(opts.overview_scroll_delay) or 0) / interval + 0.5) -- hold ticks (each end)
+        local sticks = math.max(1, math.ceil(dist / px))       -- ticks to complete the glide
+        local v = overview_scroll_idx % (hold + sticks + hold) -- top-hold + glide + end-hold
+        local off
+        if v < hold then off = 0                               -- hold at the top
+        elseif v < hold + sticks then off = math.min(dist, (v - hold) * px) -- glide down
+        else off = dist end                                    -- hold at the end (last line at the bottom)
+        local clip = string.format("\\clip(%d,%d,%d,%d)",
+            math.floor(x + pad), math.floor(cy),
+            math.floor(x + pad + innerw), math.floor(cy + winh))
+        local s = math.floor(off / lineh)          -- first (partly) visible line
+        while true do
+            local ytop = cy - off + s * lineh
+            if ytop > cy + winh then break end
+            if s >= 0 and s < pool then            -- a real line; past the last line = blank (no wrap, no gap)
+                content[#content + 1] = string.format(
+                    "{\\an7\\q2\\pos(%d,%d)%s\\alpha&H%s&\\bord2\\shad1\\3c&H000000&\\1c&HC8C8C8&\\fs%d}%s",
+                    math.floor(x + pad), math.floor(ytop), clip, fa(0), ofs, ass_escape(all[s + 1]))
+            end
+            s = s + 1
+        end
+        cy = cy + winh
     end
 
     logo_rect = nil
@@ -341,6 +408,14 @@ function M.build_card(c)
             -- (~live_upcoming_secs, i.e. 1s), then restarts at the top hold.
             local pool = #c.upcoming
             local win = math.max(1, tonumber(opts.live_upcoming_lines) or 3)
+            if cap then
+                -- Keep the card within the height ceiling by shedding the least-important
+                -- (bottom-most) "Next" rows. Everything above here is height-bounded, so
+                -- this is the only elastic section; each row is floor(18*1.25)=22 px and the
+                -- block is the last thing drawn, so no further reserve is needed.
+                local rows_fit = math.floor((cap - pad - (cy - y)) / (fs > 0 and math.floor(fs * 1.25) or 22))
+                win = math.max(1, math.min(win, rows_fit))
+            end
             line(up_line(c.upcoming[1]), fs, "FFFFFF", true) -- pinned imminent programme
             local rest, sw = pool - 1, win - 1               -- c.upcoming[2..pool]
             if rest > 0 and sw > 0 then
@@ -367,10 +442,11 @@ function M.build_card(c)
         end
         logo_rect = { x = x + pad, y = cy, h = band }
         cy = cy + band + LOGO_GAP -- clear the logo band (autocrop makes band == artwork)
-        if c.year and c.year ~= "" then line(tostring(c.year), 21, "B4B4B4") end
+        -- movie's year is folded into the meta line below (bold); TV/unknown keep it here
+        if c.kind ~= "movie" and c.year and c.year ~= "" then line(tostring(c.year), 21, "B4B4B4") end
     else
         local head = c.title or "Unknown"
-        if c.year and c.year ~= "" then head = head .. "  (" .. c.year .. ")" end
+        if c.kind ~= "movie" and c.year and c.year ~= "" then head = head .. "  (" .. c.year .. ")" end
         -- Big 38px title, shrunk to 28px when it wouldn't fit one line, wrapped to
         -- <=3 lines. The "unknown" card's raw file name is kept to ONE line instead
         -- (tail-ellipsised at a separator — a long dotted name reads poorly wrapped).
@@ -395,6 +471,77 @@ function M.build_card(c)
         if cc.director and cc.director ~= "" then cr[#cr + 1] = cc.director end
         if cc.studio and cc.studio ~= "" then cr[#cr + 1] = cc.studio end
         return table.concat(cr, " \226\128\162 ") -- single-spaced bullet: <director> • <studio>
+    end
+
+    -- meta facts (aired · runtime · cert · box office · director/studio). Built here so the
+    -- MOVIE meta line can sit ABOVE the rating (below the tagline) with the year folded in;
+    -- TV reuses meta_str in its genre+meta row below the rating.
+    local function fmt_money(n) -- compact box-office figure, e.g. $785M / $1.2B
+        n = tonumber(n)
+        if not n then return nil end
+        if n >= 1e9 then return string.format("$%.1fB", n / 1e9) end
+        if n >= 1e6 then return string.format("$%.0fM", n / 1e6) end
+        if n >= 1e3 then return string.format("$%.0fK", n / 1e3) end
+        return string.format("$%d", n)
+    end
+    local meta = {}
+    do
+        local aired = c.aired or c.air_date
+        if aired and aired ~= "" then meta[#meta + 1] = "Aired " .. fmt_date(aired) end
+        if c.runtime and tonumber(c.runtime) then meta[#meta + 1] = string.format("%d min", c.runtime) end
+        if c.mpaa and c.mpaa ~= "" then meta[#meta + 1] = c.mpaa end
+        local bo = fmt_money(c.boxoffice); if bo then meta[#meta + 1] = bo end
+    end
+    -- meta_str = aired · runtime · cert (· box) — used by the TV genre+meta row. The MOVIE
+    -- meta line below builds its own LEFT/RIGHT clusters straight from `c` (not this list).
+    local meta_str = (#meta > 0) and table.concat(meta, "   \226\128\162   ") or nil
+
+    -- MOVIE/unknown: meta line ABOVE the rating, split into TWO clusters on ONE row, joined
+    -- by a condensed " • " bullet. LEFT (\an7, inner-left): bold (YYYY) + runtime + BOLD
+    -- director. RIGHT (\an9, right-aligned to the inner edge): cert + GOLD-BOLD box office +
+    -- studio (grey otherwise). Year is bold-folded here (dropped from the heading). Both
+    -- events share \bord2\shad1\3c styling; per-field colour/weight is set with inline tags,
+    -- so widths are budgeted from PLAIN text (the director — the variable field — ellipsises).
+    if c.kind ~= "tv" then
+        local mfs, BULL = 21, " \226\128\162 "
+        local GREY, GOLD = "B4B4B4", "18C5F5"
+        local function bold(s) return "{\\b1}" .. ass_escape(s) .. "{\\b0}" end
+        local yr = (c.kind == "movie" and c.year and c.year ~= "") and ("(" .. c.year .. ")") or nil
+        local runtime_str = (c.runtime and tonumber(c.runtime)) and string.format("%d min", c.runtime) or nil
+        local dir_str = (c.director and c.director ~= "") and c.director or nil
+        -- RIGHT: cert (grey) • $box (gold+bold) • studio (grey). Rendered + plain in lockstep.
+        local rparts, rplain = {}, {}
+        if c.mpaa and c.mpaa ~= "" then rparts[#rparts + 1] = ass_escape(c.mpaa); rplain[#rplain + 1] = c.mpaa end
+        local bo = fmt_money(c.boxoffice)
+        if bo then rparts[#rparts + 1] = "{\\1c&H" .. GOLD .. "&}" .. bold(bo) .. "{\\1c&H" .. GREY .. "&}"; rplain[#rplain + 1] = bo end
+        if c.studio and c.studio ~= "" then rparts[#rparts + 1] = ass_escape(c.studio); rplain[#rplain + 1] = c.studio end
+        local right_body = (#rparts > 0) and table.concat(rparts, ass_escape(BULL)) or nil
+        local rw = (#rplain > 0) and text_w(table.concat(rplain, BULL), mfs) or 0
+        -- LEFT: bold year + runtime + bold director. Fixed (year+runtime) prefix, then the
+        -- director ellipsised to the room before the right cluster — in fitw space (text_w
+        -- over-estimates ~1.22x, fitw = innerw*1.22 → reserve the right cluster + a 24px gap).
+        local lparts, lplain = {}, {}
+        if yr then lparts[#lparts + 1] = bold(yr); lplain[#lplain + 1] = yr end
+        if runtime_str then lparts[#lparts + 1] = ass_escape(runtime_str); lplain[#lplain + 1] = runtime_str end
+        if dir_str then
+            local usedw = (#lplain > 0) and text_w(table.concat(lplain, BULL) .. BULL, mfs) or 0
+            dir_str = ellipsize_px(dir_str, math.max(40, fitw - rw - 24 - usedw), mfs)
+            lparts[#lparts + 1] = bold(dir_str)
+        end
+        local left_body = (#lparts > 0) and table.concat(lparts, ass_escape(BULL)) or nil
+        if left_body or right_body then
+            if left_body then
+                content[#content + 1] = string.format(
+                    "{\\an7\\pos(%d,%d)\\alpha&H%s&\\bord2\\shad1\\3c&H000000&\\1c&H" .. GREY .. "&\\fs%d}%s",
+                    math.floor(x + pad), math.floor(cy), fa(0), mfs, left_body)
+            end
+            if right_body then
+                content[#content + 1] = string.format(
+                    "{\\an9\\pos(%d,%d)\\alpha&H%s&\\bord2\\shad1\\3c&H000000&\\1c&H" .. GREY .. "&\\fs%d}%s",
+                    math.floor(x + pad + innerw), math.floor(cy), fa(0), mfs, right_body)
+            end
+            cy = cy + math.floor(mfs * 1.25)
+        end
     end
 
     -- TV: SxxEyy · Episode Title (Director · Studio) — bare director, no "Dir." label
@@ -470,34 +617,52 @@ function M.build_card(c)
         cy = cy + math.floor(23 * 1.25)
     end
 
-    -- meta: aired · runtime · mpaa · box office · director/studio
-    local function fmt_money(n) -- compact box-office figure, e.g. $785M / $1.2B
-        n = tonumber(n)
-        if not n then return nil end
-        if n >= 1e9 then return string.format("$%.1fB", n / 1e9) end
-        if n >= 1e6 then return string.format("$%.0fM", n / 1e6) end
-        if n >= 1e3 then return string.format("$%.0fK", n / 1e3) end
-        return string.format("$%d", n)
-    end
-    local meta = {}
-    local aired = c.aired or c.air_date
-    if aired and aired ~= "" then meta[#meta + 1] = "Aired " .. fmt_date(aired) end
-    if c.runtime and tonumber(c.runtime) then meta[#meta + 1] = string.format("%d min", c.runtime) end
-    if c.mpaa and c.mpaa ~= "" then meta[#meta + 1] = c.mpaa end
-    do local bo = fmt_money(c.boxoffice); if bo then meta[#meta + 1] = bo end end
-    if c.kind ~= "tv" then local cr = credit_str(c); if cr ~= "" then meta[#meta + 1] = cr end end
-    if #meta > 0 then line(ellipsize_px(table.concat(meta, "   \226\128\162   "), fitw, 21), 21, "B4B4B4") end
+    -- genres (bold grey) + the OMDb award highlight (gold ★, leading clause; rare on TV).
+    local gfs = 21
+    local gstr = (c.genres and #c.genres > 0) and genres_str(c) or nil
+    local astr = (c.awards and c.awards ~= "")
+        and ("\226\152\133 " .. (c.awards:match("^[^.]+") or c.awards)) or nil
 
-    -- awards highlight (from OMDb): the leading clause only ("Won 3 Oscars." ->
-    -- "Won 3 Oscars"), on its own gold ★ line so it reads as a badge, not buried in
-    -- the grey meta row. Best-effort; absent for much TV / obscure titles.
-    if c.awards and c.awards ~= "" then
-        local head = c.awards:match("^[^.]+") or c.awards
-        line(ellipsize_px("\226\152\133 " .. head, fitw, 21), 21, "18C5F5")
+    local right_x = x + pad + innerw -- card inner right edge (right-align anchor for \an9)
+    if c.kind == "tv" then
+        -- TV: fold the meta line and the genre row into ONE dense row — genres LEFT (bold),
+        -- the meta facts (aired/runtime/mpaa/…) RIGHT-aligned (grey) via \an9 (libass aligns
+        -- exactly to the edge — no text_w gap), award (rare) a gold ★ at the far right.
+        local aw = astr and text_w(astr, gfs) or 0 -- estimate: only spaces the meta left of an award
+        if gstr then
+            cy = cy + 4
+            if astr then content[#content + 1] = text_run(right_x, cy, astr, gfs, "18C5F5", { alpha = fa(0), an = 9 }) end
+            if meta_str then content[#content + 1] = text_run(right_x - (astr and (aw + 16) or 0), cy, meta_str, gfs, "B4B4B4", { alpha = fa(0), an = 9 }) end
+            -- genres fill the left; ellipsise conservatively (text_w over-estimates → safe gap)
+            local budget = innerw - (meta_str and text_w(meta_str, gfs) or 0) - (astr and (aw + 16) or 0) - 16
+            content[#content + 1] = text_run(x + pad, cy, ellipsize_px(gstr, math.max(40, budget), gfs), gfs, "DCDCDC", { alpha = fa(0), bold = true })
+            cy = cy + math.floor(gfs * 1.25)
+        elseif meta_str or astr then -- no genres → meta stays LEFT (award right if present)
+            cy = cy + 4
+            if astr then content[#content + 1] = text_run(right_x, cy, astr, gfs, "18C5F5", { alpha = fa(0), an = 9 }) end
+            if meta_str then content[#content + 1] = text_run(x + pad, cy, ellipsize_px(meta_str, astr and math.max(40, innerw - aw - 16) or fitw, gfs), gfs, "B4B4B4", { alpha = fa(0) }) end
+            cy = cy + math.floor(gfs * 1.25)
+        end
+    else
+        -- movie/unknown: just the genre (left) + award (right, gold ★) row — the meta line is
+        -- drawn ABOVE the rating (with the year), so it's not repeated here. Award right-aligns
+        -- via \an9; a lone award stays left.
+        if gstr and astr then
+            cy = cy + 4
+            content[#content + 1] = text_run(right_x, cy, astr, gfs, "18C5F5", { alpha = fa(0), an = 9 }) -- award right
+            content[#content + 1] = text_run(x + pad, cy,
+                ellipsize_px(gstr, math.max(40, innerw - text_w(astr, gfs) - 16), gfs), gfs, "DCDCDC", { alpha = fa(0), bold = true })
+            cy = cy + math.floor(gfs * 1.25)
+        elseif gstr then
+            cy = cy + 4
+            content[#content + 1] = text_run(x + pad, cy, ellipsize_px(gstr, fitw, gfs), gfs, "DCDCDC", { alpha = fa(0), bold = true })
+            cy = cy + math.floor(gfs * 1.25)
+        elseif astr then
+            cy = cy + 4
+            content[#content + 1] = text_run(x + pad, cy, ellipsize_px(astr, fitw, gfs), gfs, "18C5F5", { alpha = fa(0) }) -- lone award: left
+            cy = cy + math.floor(gfs * 1.25)
+        end
     end
-
-    -- genres on their own line (above the synopsis)
-    if c.genres and #c.genres > 0 then cy = cy + 4; line(genres_str(c), 21, "DCDCDC", true) end
 
     -- overview / synopsis. Default: wrapped to overview_lines, static. With
     -- overview_scroll: a fixed overview_lines window over the FULL wrapped text,
@@ -506,7 +671,33 @@ function M.build_card(c)
     -- width to the right edge, not a rough 74-char guess.
     if c.overview and c.overview ~= "" then
         cy = cy + 6
-        render_overview(c.overview, math.max(1, tonumber(opts.overview_lines) or 3), opts.overview_scroll)
+        local olines = math.max(1, tonumber(opts.overview_lines) or 3)
+        if cap then
+            -- Trim the synopsis window to keep the card within the height ceiling. cy here
+            -- already covers everything ABOVE (title/logo, tagline, subline, rating, meta,
+            -- awards, genres); subtract a reserve for the sections drawn AFTER the overview
+            -- so they aren't pushed below the box (cast, tech pills, tech line, progress).
+            -- Reserve the progress row whenever show_tech even though it draws only mid-
+            -- playback (percent-pos>0) — else it appearing a few seconds in would reflow
+            -- the synopsis line count. The reserve is an UPPER bound: over-reserving only
+            -- costs a synopsis line, under-reserving would overflow the footer.
+            local reserve = 0
+            if c.cast and #c.cast > 0 and not casthead_active then
+                local clh = math.floor((tonumber(opts.cast_fs) or 21) * 1.25)
+                local cdir = tostring(opts.cast_scroll_dir or "horizontal"):lower()
+                if opts.cast_scroll and cdir ~= "vertical" then
+                    reserve = reserve + 4 + clh                                      -- horizontal 1-line ticker
+                elseif opts.cast_scroll then
+                    reserve = reserve + 4 + clh * math.max(1, tonumber(opts.cast_lines) or 2) -- vertical grid
+                else
+                    reserve = reserve + 4 + clh * 2                                  -- packed <=2 rows
+                end
+            end
+            if opts.show_tech then reserve = reserve + 34 + 28 + 33 end              -- tech pills + tech line + progress row
+            local budget = cap - pad - (cy - y) - reserve
+            olines = math.max(1, math.min(olines, math.floor(budget / 26)))         -- render_overview line = floor(21*1.25)=26
+        end
+        render_overview(c.overview, olines, opts.overview_scroll)
     end
 
     -- cast (amber, bold). Each entry is "Name (Role)" (role optional); entries may

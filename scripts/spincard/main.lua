@@ -43,6 +43,8 @@ local opts = {
     pos_x     = 22,     -- left margin (virtual px) — ~3% on 16:9, matches the banner inset
     pos_y     = 22,     -- margin from the top OR bottom edge (see anchor); ~3%, matches the banner
     anchor    = "bottom", -- "bottom" (hug bottom, grow up) or "top"
+    card_aspect = "16:9", -- height-ceiling aspect (width:height): "16:9" (default, ->484), "phi"/"golden" (φ≈1.618 ->532), "3:2", "1.85", a bare W/H number, or "off" to disable. Ceiling height = CARD_W / ratio; taller cards trim the elastic synopsis (movie/TV) / "Next" (live-TV), shorter cards are untouched
+    card_max_height = 0,  -- explicit height-ceiling override in virtual px; 0 = derive from card_aspect (default)
     enrich    = true,      -- look up online metadata (needs api_key)
     api_key   = "",        -- TMDB API key; empty => filename-only card
     language  = "en-US",   -- TMDB response language
@@ -51,10 +53,10 @@ local opts = {
     omdb_api_key = "",     -- OMDb API key for the IMDb rating; empty => IMDb source off (shown alongside TMDB when both keys set)
     imdb_votes = true,     -- show the IMDb vote count next to the rating (e.g. 8.1 (1.2M))
     tvheadend_url = "",    -- e.g. http://127.0.0.1:9981 — live-TV EPG source ("" = off)
-    live_upcoming = 7,     -- live TV: how many upcoming programmes to keep for "Up next" (0 = none)
-    live_upcoming_lines = 3, -- live TV: "Up next" visible window (rows); scrolls through the pool if more
-    live_upcoming_secs = 1.5, -- live TV: seconds per 1-line "Up next" scroll step (0 = don't scroll); top hold stays ~live_upcoming_delay
-    live_upcoming_delay = 3, -- live TV: hold the first "Up next" window this many seconds before scrolling
+    live_upcoming = 7,     -- live TV: how many upcoming programmes to keep for "Next" (0 = none)
+    live_upcoming_lines = 3, -- live TV: "Next" visible window (rows); scrolls through the pool if more
+    live_upcoming_secs = 1.5, -- live TV: seconds per 1-line "Next" scroll step (0 = don't scroll); top hold stays ~live_upcoming_delay
+    live_upcoming_delay = 3, -- live TV: hold the first "Next" window this many seconds before scrolling
     live_signal   = true,  -- live TV: show tuner signal strength / SNR meter (needs tvheadend_url)
     live_signal_interval = 3, -- live TV: seconds between signal polls while the card is visible (0 = read once on show)
     signal_dbm_max = -40.6, -- live TV: dBm that fills the signal meter (tuner's max; meter spans 50 dB below it)
@@ -70,6 +72,8 @@ local opts = {
     banner_height  = 0.10,  -- banner height as a fraction of the video height
     show_logo      = true,  -- clearlogo.png title art, top-left (transparent PNG)
     remote_art     = true,  -- when no LOCAL poster/fanart/clearlogo sits beside the media, fall back to TMDB-hosted art (needs api_key + network)
+    fanart_tv_api_key = "",  -- fanart.tv project API key; adds a DISC + BANNER remote fallback (TMDB has neither). Empty => local disc.png/banner.jpg only. Movie-only
+
     logo_height    = 0.12,  -- logo height as a fraction of the video height
     logo_autocrop  = true,  -- crop the clearlogo's transparent margins so its slot maps to real artwork
     show_disc      = true,  -- 3/4 disc.png nestled at the card's top-left corner
@@ -77,6 +81,7 @@ local opts = {
     disc_spin      = true,  -- spin the disc while the card is showing
     disc_spin_secs = 5,     -- seconds per full rotation (higher = slower; 5 just reads nicer)
     disc_spin_frames = 96,  -- rotation frames (more = smoother; larger temp file)
+    disc_pause_only = false, -- yes = show the disc ONLY while paused (hidden during playback, when it spins = the CPU cost on a weak GPU); shown frozen on pause. Set on i7. no = disc shows + spins during playback (default)
     cast_max      = 5,      -- max cast entries shown/cycled (also the scroll pool size)
     cast_scroll   = true,   -- scroll the cast (else pack ≤2 rows); style set by cast_scroll_dir
     cast_scroll_dir = "horizontal", -- "horizontal" (1-line glide ticker) | "vertical" (2×2 grid)
@@ -93,9 +98,13 @@ local opts = {
     casthead_height = 0.19, -- headshot height as a fraction of the video height
     casthead_over_banner = true, -- draw the strip at the top OVER the banner (banner stays behind); off = sit under the banner
     casthead_over_banner_inset = 0.25, -- when over the banner, inset the strip's top-left corner down+right by this fraction of the banner's drawn height, so the banner's top strip stays visible
+    casthead_pause_only = true, -- show the headshot strip ONLY while paused; hidden while playing. The strip still REPLACES the card's text cast, so while playing the card simply omits the cast (no strip, no text line). The marquee freezes on resume and resumes from the same spot on the next pause. no = strip always shown
     overview_scroll = true, -- scroll the synopsis through a fixed overview_lines window
-    overview_scroll_secs = 3,-- seconds between synopsis scroll steps (0 = don't advance)
-    overview_scroll_delay = 3,-- seconds to hold the first synopsis window before scrolling (read the opening line)
+    overview_scroll_mode = "smooth", -- "smooth" (continuous px glide, default) | "line" (jump one wrapped line every overview_scroll_secs)
+    overview_scroll_px = 0.8, -- smooth mode: px glided per tick (speed; fractional ok)
+    overview_scroll_interval = 0.1, -- smooth mode: seconds per tick (smoothness; render() rebuilds each tick)
+    overview_scroll_secs = 3,-- line mode: seconds between one-line scroll steps (0 = don't advance)
+    overview_scroll_delay = 5,-- seconds to hold the synopsis at each end (smooth: top AND bottom, every cycle; line: the first window)
     overview_lines = 4,     -- synopsis viewport height (lines)
     nfo_supplement = true,  -- fill a local .nfo's MISSING fields (cast/genres/…) from TMDB (needs api_key)
     force_remote  = false,  -- TESTING: ignore the local .nfo + disk caches and always re-query TMDB/OMDb fresh
@@ -138,8 +147,10 @@ local card_rect = nil    -- card box rect in 1280x720 coords, set by build_card
 local anim_fade, refresh_timer = 1, nil -- anim_fade stays 1 (fades disabled)
 local cast_scroll_idx, cast_scroll_timer = 0, nil -- cast marquee window offset + timer
 local overview_scroll_idx, overview_scroll_timer = 0, nil -- synopsis marquee offset + timer
-local upnext_scroll_idx, upnext_scroll_timer = 0, nil -- live-TV "Up next" marquee offset + timer
-local casthead_active = false -- cast-headshot strip is showing → build_card drops the text cast
+local upnext_scroll_idx, upnext_scroll_timer = 0, nil -- live-TV "Next" marquee offset + timer
+local casthead_active = false -- cast-headshot strip is active for this card → build_card drops
+                              -- the text cast (dropped whether or not the strip overlay is
+                              -- currently shown; casthead_pause_only gates only the OVERLAY)
 local current_gen = 0
 local render, show, hide, toggle   -- forward declarations
 local gather_tech = tech.gather_tech -- reads live mpv props → tech table (tech.lua)
@@ -324,9 +335,16 @@ show = function(timeout)
     if overview_scroll_timer then overview_scroll_timer:kill(); overview_scroll_timer = nil end
     overview_scroll_idx = 0
     if opts.overview_scroll then
-        local ov = tonumber(opts.overview_scroll_secs) or 0
+        -- smooth mode ticks fast (overview_scroll_interval) and glides px/tick; line mode
+        -- steps a whole wrapped line every overview_scroll_secs. Both hold the first window
+        -- for overview_scroll_delay via the one-shot -> periodic handoff below.
+        local smooth = tostring(opts.overview_scroll_mode or "smooth"):lower() ~= "line"
+        local ov = smooth and (tonumber(opts.overview_scroll_interval) or 0.1)
+                          or (tonumber(opts.overview_scroll_secs) or 0)
         if ov > 0 then
-            local delay = math.max(0, tonumber(opts.overview_scroll_delay) or 0)
+            -- smooth bakes the initial AND per-cycle top-hold into the offset math
+            -- (card.lua), so it just ticks; line mode holds only the FIRST window here.
+            local delay = smooth and 0 or math.max(0, tonumber(opts.overview_scroll_delay) or 0)
             local function step()
                 if visible then overview_scroll_idx = overview_scroll_idx + 1; render(true) end
             end
@@ -341,7 +359,7 @@ show = function(timeout)
         end
     end
 
-    -- live-TV "Up next" marquee: just tick the index every live_upcoming_secs; the
+    -- live-TV "Next" marquee: just tick the index every live_upcoming_secs; the
     -- sawtooth in card.build_card maps it to a hold-scroll-hold-restart window (the
     -- live_upcoming_delay holds at both ends live there, so no delay handoff here).
     if upnext_scroll_timer then upnext_scroll_timer:kill(); upnext_scroll_timer = nil end
@@ -587,6 +605,47 @@ local function on_file_loaded()
         end
     end
 
+    -- fanart.tv fallback for the two artwork types TMDB can't supply: DISC + BANNER.
+    -- One lookup per load (remote_done.fanart_tv), then download + decode each via the
+    -- normal decode path. Movie-only (fanart.tv TV needs a TVDB id we don't carry).
+    -- Reached through the `images` upvalue (images.fanart_fetch / images.fetch_url) so
+    -- on_file_loaded gains no new upvalue past LuaJIT's 60 ceiling; disc/banner decode +
+    -- show locals are already upvalues (used by the local-art blocks below).
+    local function fetch_fanart_art(g)
+        if not opts.remote_art or not cur_card then return end
+        if not opts.fanart_tv_api_key or opts.fanart_tv_api_key == "" then return end
+        if remote_done.fanart_tv then return end
+        local need_disc = opts.show_disc and not disc_path
+        local need_banner = opts.show_banner and not banner_path
+        if not (need_disc or need_banner) then return end
+        -- need an id to look up; a fresh card has none until do_tmdb fills it, so DON'T
+        -- burn the once-per-load flag yet — let the do_tmdb-site call fetch once id is set.
+        if not (cur_card.id or cur_card.imdb_id) then return end
+        remote_done.fanart_tv = true
+        images.fanart_fetch({ id = cur_card.id, imdb_id = cur_card.imdb_id, kind = cur_card.kind },
+            function(res)
+                if not res or g ~= current_gen then return end
+                if need_disc and res.disc then
+                    images.fetch_url(res.disc, "disc", function(f)
+                        if not f or g ~= current_gen then return end
+                        disc.ready = false
+                        disc_decode(f, function(ok)
+                            if ok and g == current_gen and visible then disc_show(); disc_spin_start() end
+                        end)
+                    end)
+                end
+                if need_banner and res.banner then
+                    images.fetch_url(res.banner, "banner", function(f)
+                        if not f or g ~= current_gen then return end
+                        banner.ready = false
+                        banner_decode(f, function(ok)
+                            if ok and g == current_gen and visible then banner_show() end
+                        end)
+                    end)
+                end
+            end)
+    end
+
     -- Poster image: decode the local jpg (once per poster), show when ready.
     poster_hide()
     if opts.show_poster and poster_path then
@@ -657,6 +716,7 @@ local function on_file_loaded()
     -- Remote fallback for any art with no local file (cached cards already carry the
     -- TMDB paths; fresh fetches trigger it again from the do_tmdb callback below).
     fetch_remote_art(gen)
+    fetch_fanart_art(gen) -- disc + banner from fanart.tv (needs fanart_tv_api_key)
 
     -- Cast-headshot strip: drop the text cast (set active synchronously to avoid a
     -- text→heads flash) and prepare the row; the async prepare draws the heads, or
@@ -751,6 +811,7 @@ local function on_file_loaded()
             end
             if do_imdb then fire_imdb(gen) end -- now cur_card.imdb_id (external_ids) is set, else title
             fetch_remote_art(gen)              -- now cur_card carries the TMDB art paths
+            fetch_fanart_art(gen)             -- disc + banner from fanart.tv (cur_card.id now set)
             fire_casthead(gen)                 -- now cur_card.cast carries TMDB profile paths
             if visible then render() end
         end)
@@ -827,7 +888,19 @@ mp.observe_property("pause", "bool", function(_, paused)
         if opts.fanart_pause_only then
             if paused then fanart_show() else fanart_hide() end
         end
-        if paused then disc_spin_stop() else disc_spin_start() end
+        -- disc_pause_only: the disc lives only while paused (frozen) — draw it on pause,
+        -- remove it on resume (no spin timer at all). Otherwise: freeze on pause / spin on resume.
+        if opts.disc_pause_only then
+            if paused then disc_show() else disc_spin_stop(); img_remove(disc) end
+        else
+            if paused then disc_spin_stop() else disc_spin_start() end
+        end
+        -- casthead pause-only: toggle just the STRIP OVERLAY — show on pause (resumes the
+        -- marquee from its saved offset), hide on resume (freezing the offset). The card's
+        -- text cast stays dropped either way (the strip replaces it), so no re-render needed.
+        if opts.cast_headshots and opts.casthead_pause_only and casthead_active then
+            if paused then images.casthead_show() else images.casthead_hide() end
+        end
     end
 end)
 

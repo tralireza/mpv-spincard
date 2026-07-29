@@ -8,9 +8,10 @@ year, ratings (IMDb · Rotten Tomatoes · Metacritic · TMDB), awards, box offic
 genres, a scrolling plot, cast, and live file details.
 
 Works **fully offline** from the files next to your media. Optional online lookups
-add more: **TMDB** for metadata + an artwork fallback when a title has no local
-images, and **OMDb** for IMDb / Rotten Tomatoes / Metacritic scores — each off
-unless you add its key.
+add more: **TMDB** for metadata + a poster/fanart/clearlogo fallback when a title has
+no local images, **fanart.tv** for the **disc** and **banner** art TMDB doesn't carry,
+and **OMDb** for IMDb / Rotten Tomatoes / Metacritic scores — each off unless you add
+its key.
 
 ![spincard — Waterworld: a top-left scrolling cast-headshot strip with names and roles, local banner and clearlogo title, poster and a spinning disc, an IMDb · Rotten Tomatoes · Metacritic · TMDB rating row, awards, box office, genres, scrolling plot and tier-coloured tech pills](docs/screenshots/spindisc.png)
 
@@ -18,7 +19,7 @@ unless you add its key.
 
 ![spincard — Breaking Bad TV episode card: a scrolling cast-headshot strip (profiles merged onto the .nfo cast), banner and clearlogo, S04E01 season progress, IMDb and TMDB rating, air date, genres and plot](docs/screenshots/tv.png)
 
-![spincard — live TV via Tvheadend: current programme, channel, signal/SNR meter, transponder pills and an "Up next" list](docs/screenshots/livetv.png)
+![spincard — live TV via Tvheadend: current programme, channel, signal/SNR meter, transponder pills and a "Next" list](docs/screenshots/livetv.png)
 
 ## Features
 
@@ -33,18 +34,23 @@ unless you add its key.
   - **Disc** (`disc.png`) — a 3/4 disc nestled at the card's corner that **spins**.
   - **TMDB-hosted fallback** (`remote_art`) — any poster / fanart / clearlogo with
     no local file is fetched from TMDB and cached to disk, so it downloads once.
+  - **fanart.tv fallback** (`fanart_tv_api_key`) — TMDB has no disc or banner art, so
+    with a free fanart.tv key the **disc** and **banner** are fetched from fanart.tv when
+    there's no local `disc.png` / `banner.jpg` (movie-only; cached to disk like the rest).
 - **Cast headshots** (`cast_headshots`, off by default) — a separate desktop strip of
   TMDB cast profile photos, top-left under the banner (TMDB-only; cached like the other
   art). Two styles via `casthead_style`: **`static`** (a fixed row with name labels) or
   **`scroll`** (a right→left marquee of all cast faces, each with its name and role labelled
-  beneath it). Either way it replaces the card's text cast while shown.
+  beneath it). Either way it replaces the card's text cast. By default (`casthead_pause_only`)
+  the strip appears **only while paused** (while playing the card just omits the cast), and
+  the marquee resumes from where it left off on the next pause.
 - **Live file details from mpv** (no external tools): codec · HDR/SDR · fps ·
   resolution · container · size, audio/subtitle languages (channels + forced),
   chapter count, and a **live progress bar** with ETA.
 - **Season progress** — `S03E08 (/10)` counted from the season folder.
 - **Live TV (Tvheadend)** — playing a Tvheadend stream shows the current
   programme from its EPG: title, channel, plot, a live now-bar with start/end
-  times, and an **Up next** list of the following programmes. Resolved from
+  times, and a **Next** list of the following programmes. Resolved from
   the stream URL's channel id.
 - **Ratings from multiple sources** — a colour-coded ★ **IMDb** headline (via the
   OMDb API) with a right-hand cluster of **TMDB**, **Rotten Tomatoes** and
@@ -94,8 +100,7 @@ or TMDB-only card shows fewer rows; the `│` is the gold accent edge):
   │ 1995 · tagline
   │ ★★★☆☆ IMDb 8.0 (223k)   [TMDB] [RT] [MC]      rating row
   │ runtime · cert · $box office · director · studio
-  │ ★ awards
-  │ genres
+  │ genres                              ★ awards   (one row: genres L, award R)
   │ plot / synopsis                               (scrolls)
   │ cast — Name (Role)      (scrolls; replaced by the headshot strip when on)
   │ [4K][HDR][HEVC][7.1][fps]                     tier-coloured tech pills
@@ -109,7 +114,8 @@ or TMDB-only card shows fewer rows; the `│` is the gold accent edge):
 - **mpv** built with Lua (LuaJIT or Lua 5.1/5.2).
 - **ffmpeg** on `PATH` — for the poster / fanart / clearlogo / disc images.
 - **curl** — only for the online features: TMDB (`api_key`), OMDb (`omdb_api_key`),
-  the TMDB artwork fallback (`remote_art`), or Tvheadend (`tvheadend_url`).
+  the TMDB artwork fallback (`remote_art`), fanart.tv disc/banner (`fanart_tv_api_key`),
+  or Tvheadend (`tvheadend_url`).
 
 ## Install
 
@@ -156,14 +162,15 @@ remote_art=yes    # fetch poster/fanart/clearlogo from TMDB when there's no loca
 show_disc=yes     disc_size=0.22
 disc_spin=yes     disc_spin_secs=5   disc_spin_frames=96
 show_banner=yes   banner_height=0.10   # wide banner.jpg top-left (if present)
+fanart_tv_api_key=                       # fanart.tv key: fetch movie disc + banner when no local file (movie-only)
 show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
-overview_scroll=yes  overview_lines=4  overview_scroll_secs=3   # scrolling synopsis
-cast_headshots=no  casthead_style=scroll  casthead_max=10  casthead_height=0.19   # cast photo strip (scroll marquee | static row)
+overview_scroll=yes  overview_lines=4  overview_scroll_mode=smooth   # synopsis: smooth glide (or "line")
+cast_headshots=no  casthead_style=scroll  casthead_max=10  casthead_pause_only=yes   # cast photo strip; shown while paused (scroll | static)
 
 enrich=yes   api_key=   omdb_api_key=   language=en-US   # TMDB + OMDb (optional; empty = local only)
 rating_ttl=3600                          # refresh IMDb/TMDB ratings when older than this (s); 0 = off
 tvheadend_url=                           # live-TV EPG (e.g. http://127.0.0.1:9981)
-live_upcoming=7                          # live TV: "Up next" programmes to list (0 = none)
+live_upcoming=7                          # live TV: "Next" programmes to list (0 = none)
 ```
 
 ## Library layout (Kodi / Emby)
@@ -185,12 +192,18 @@ TV/Breaking Bad/
 
 No `.nfo`? The card falls back to the parsed filename (and TMDB, if a key is set).
 
+Missing artwork is fetched online when the keys are set: **poster / fanart / clearlogo**
+from **TMDB** (`remote_art`, on by default), and the **disc + banner** — which TMDB
+doesn't provide — from **fanart.tv** (`fanart_tv_api_key`, movie-only). Both only kick in
+when the local file is absent, and each download is cached under `~/.cache/spincard/img/`
+so a title is fetched once.
+
 ## Live TV (Tvheadend)
 
 Point spincard at your [Tvheadend](https://tvheadend.org) server and a live-TV
 stream becomes a now-playing card built from Tvheadend's EPG — current
 programme title, channel, plot, a live progress bar (start/end times, when it
-ends) and an **Up next** list of the following programmes (three by default;
+ends) and a **Next** list of the following programmes (three by default;
 set `live_upcoming`).
 
 ```
@@ -254,8 +267,8 @@ Live-TV mux  │ delivery system (DVB-S2…) + modulation (8PSK…) in card gold
 the card (ASS via `osd-overlay`) and the artwork (BGRA via `overlay-add`, decoded
 by ffmpeg). The disc spin packs rotation frames into one file and cycles the
 overlay byte-offset. Live file details come straight from mpv properties. Optional
-TMDB/OMDb lookups and the remote-artwork download run as async `curl` subprocesses,
-cached under `~/.cache/spincard/` so a title is only fetched once.
+TMDB / OMDb / fanart.tv lookups and the remote-artwork downloads run as async `curl`
+subprocesses, cached under `~/.cache/spincard/` so a title is only fetched once.
 
 ## Notes
 
