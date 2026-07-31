@@ -42,6 +42,7 @@ summary (exit 1).
 - **`test_card_rating.lua`** — the rating row (IMDb headline + TMDB/RT/MC cluster).
 - **`test_card_height.lua`** — the 16:9 / φ height ceiling (trims synopsis / "Next", keeps the footer).
 - **`test_overview_scroll.lua`** — synopsis scroll: smooth glide, both-end holds, `line` mode, static-when-fits.
+- **`test_lean_card.lua`** — the LEAN card (`toggle-lean`): `lean_hide` gates each block, hiding a block takes its leading spacing bump with it (exact height deltas + additivity), the progress row survives `tech`, live-TV + TV-row independence, `lean_hide` parsing, and a deps stub with no `lean` getter still renders the full card.
 - **`test_card_fonts.lua`** — **audit, not asserts**: dumps each element's font size across all four card kinds (movie / tv / livetv / unknown) so you can check the tiers stay uniform. `run.sh` labels it `AUDIT`.
 
 ## Notes

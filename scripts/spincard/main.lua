@@ -40,6 +40,10 @@ local opts = {
     duration  = 7,         -- auto-show-on-open timeout (0 = stay until toggled)
     toggle_timeout = 17,   -- toggle-key auto-close timeout (0 = stay until toggled)
     key       = "",        -- default toggle key ("" = bind via input.conf)
+    lean_key  = "",        -- LEAN-card key ("" = bind via input.conf, e.g.
+                           --   C script-binding spincard/toggle-lean)
+    lean_hide = "overview", -- LEAN card: blocks to omit — overview, tagline, cast, tech,
+                            -- genres, awards, rating, meta (comma/space list)
     pos_x     = 22,     -- left margin (virtual px) — ~3% on 16:9, matches the banner inset
     pos_y     = 22,     -- margin from the top OR bottom edge (see anchor); ~3%, matches the banner
     anchor    = "bottom", -- "bottom" (hug bottom, grow up) or "top"
@@ -151,6 +155,9 @@ local upnext_scroll_idx, upnext_scroll_timer = 0, nil -- live-TV "Next" marquee 
 local casthead_active = false -- cast-headshot strip is active for this card → build_card drops
                               -- the text cast (dropped whether or not the strip overlay is
                               -- currently shown; casthead_pause_only gates only the OVERLAY)
+local lean = false -- LEAN card for THIS file: build_card omits the lean_hide blocks.
+                   -- Per-file by design — reset in on_file_loaded, no lean_default opt.
+                   -- NOTE: this is the ONE new upvalue on_file_loaded can afford (59/60).
 local current_gen = 0
 local render, show, hide, toggle   -- forward declarations
 local gather_tech = tech.gather_tech -- reads live mpv props → tech table (tech.lua)
@@ -165,6 +172,7 @@ card.init(opts, {
     overview_idx = function() return overview_scroll_idx end,
     upnext_idx   = function() return upnext_scroll_idx end,
     casthead_active = function() return casthead_active end,
+    lean         = function() return lean end,
     tech         = function() if cur_tech == nil then cur_tech = gather_tech() end return cur_tech end,
 })
 
@@ -275,6 +283,72 @@ hide = function()
     msg.verbose("hide")
 end
 
+-- Arm (or clear) the auto-close timer. Lifted out of show()'s tail so the in-place
+-- FULL<->LEAN switch can re-arm it too: pressing a key is user interaction, so the card
+-- gets a fresh toggle_timeout instead of dying on the previous deadline.
+local function arm_hide(timeout)
+    if hide_timer then hide_timer:kill(); hide_timer = nil end
+    if timeout and timeout > 0 then hide_timer = mp.add_timeout(timeout, hide) end
+end
+
+-- Does the LEAN card currently omit this block? (card.lua owns the lean_hide parse; going
+-- through the existing `card` upvalue costs no new locals — see the upvalue note above.)
+local function lean_omits(name) return lean and card.lean_hidden(name) end
+
+-- (Re)create the cast + synopsis marquee timers for the CURRENT mode. Both blocks were
+-- already kill-before-create + reset-index (show() is re-entered without hide() on channel
+-- change), so they're safe to run again from the in-place FULL<->LEAN switch. A block the
+-- LEAN card omits gets NO timer: the synopsis ticker rebuilds the WHOLE card at 10 Hz, and
+-- doing that for a section that isn't drawn is pure CPU burn on the weak target box.
+local function sync_marquees()
+    -- cast marquee: advance the idx on its own cadence (build_card reads the idx).
+    -- Horizontal glide steps fast (cast_scroll_interval); vertical grid steps a row
+    -- every cast_scroll_secs. Timer-driven (not ASS \move) so it animates while paused.
+    if cast_scroll_timer then cast_scroll_timer:kill(); cast_scroll_timer = nil end
+    cast_scroll_idx = 0
+    if opts.cast_scroll and not lean_omits("cast") then
+        local cs = (tostring(opts.cast_scroll_dir or "horizontal"):lower() == "vertical")
+            and (tonumber(opts.cast_scroll_secs) or 0)
+            or (tonumber(opts.cast_scroll_interval) or 0)
+        if cs > 0 then
+            cast_scroll_timer = mp.add_periodic_timer(cs, function()
+                if visible then cast_scroll_idx = cast_scroll_idx + 1; render(true) end
+            end)
+        end
+    end
+
+    -- synopsis marquee: hold the first window for overview_scroll_delay (so the
+    -- opening line is readable) before advancing one wrapped line every
+    -- overview_scroll_secs. The initial one-shot timeout hands off to the periodic
+    -- timer (reusing overview_scroll_timer so hide() kills whichever is live).
+    if overview_scroll_timer then overview_scroll_timer:kill(); overview_scroll_timer = nil end
+    overview_scroll_idx = 0
+    if opts.overview_scroll and not lean_omits("overview") then
+        -- smooth mode ticks fast (overview_scroll_interval) and glides px/tick; line mode
+        -- steps a whole wrapped line every overview_scroll_secs. Both hold the first window
+        -- for overview_scroll_delay via the one-shot -> periodic handoff below.
+        local smooth = tostring(opts.overview_scroll_mode or "smooth"):lower() ~= "line"
+        local ov = smooth and (tonumber(opts.overview_scroll_interval) or 0.1)
+                          or (tonumber(opts.overview_scroll_secs) or 0)
+        if ov > 0 then
+            -- smooth bakes the initial AND per-cycle top-hold into the offset math
+            -- (card.lua), so it just ticks; line mode holds only the FIRST window here.
+            local delay = smooth and 0 or math.max(0, tonumber(opts.overview_scroll_delay) or 0)
+            local function step()
+                if visible then overview_scroll_idx = overview_scroll_idx + 1; render(true) end
+            end
+            if delay > 0 then
+                overview_scroll_timer = mp.add_timeout(delay, function()
+                    step()
+                    overview_scroll_timer = mp.add_periodic_timer(ov, step)
+                end)
+            else
+                overview_scroll_timer = mp.add_periodic_timer(ov, step)
+            end
+        end
+    end
+end
+
 -- show(timeout): auto-hide after `timeout`s (nil/0 = stay until toggled).
 show = function(timeout)
     if not content_ok then return end
@@ -312,52 +386,8 @@ show = function(timeout)
     if refresh_timer then refresh_timer:kill() end
     refresh_timer = mp.add_periodic_timer(1, function() if visible then render() end end)
 
-    -- cast marquee: advance the idx on its own cadence (build_card reads the idx).
-    -- Horizontal glide steps fast (cast_scroll_interval); vertical grid steps a row
-    -- every cast_scroll_secs. Timer-driven (not ASS \move) so it animates while paused.
-    if cast_scroll_timer then cast_scroll_timer:kill(); cast_scroll_timer = nil end
-    cast_scroll_idx = 0
-    if opts.cast_scroll then
-        local cs = (tostring(opts.cast_scroll_dir or "horizontal"):lower() == "vertical")
-            and (tonumber(opts.cast_scroll_secs) or 0)
-            or (tonumber(opts.cast_scroll_interval) or 0)
-        if cs > 0 then
-            cast_scroll_timer = mp.add_periodic_timer(cs, function()
-                if visible then cast_scroll_idx = cast_scroll_idx + 1; render(true) end
-            end)
-        end
-    end
-
-    -- synopsis marquee: hold the first window for overview_scroll_delay (so the
-    -- opening line is readable) before advancing one wrapped line every
-    -- overview_scroll_secs. The initial one-shot timeout hands off to the periodic
-    -- timer (reusing overview_scroll_timer so hide() kills whichever is live).
-    if overview_scroll_timer then overview_scroll_timer:kill(); overview_scroll_timer = nil end
-    overview_scroll_idx = 0
-    if opts.overview_scroll then
-        -- smooth mode ticks fast (overview_scroll_interval) and glides px/tick; line mode
-        -- steps a whole wrapped line every overview_scroll_secs. Both hold the first window
-        -- for overview_scroll_delay via the one-shot -> periodic handoff below.
-        local smooth = tostring(opts.overview_scroll_mode or "smooth"):lower() ~= "line"
-        local ov = smooth and (tonumber(opts.overview_scroll_interval) or 0.1)
-                          or (tonumber(opts.overview_scroll_secs) or 0)
-        if ov > 0 then
-            -- smooth bakes the initial AND per-cycle top-hold into the offset math
-            -- (card.lua), so it just ticks; line mode holds only the FIRST window here.
-            local delay = smooth and 0 or math.max(0, tonumber(opts.overview_scroll_delay) or 0)
-            local function step()
-                if visible then overview_scroll_idx = overview_scroll_idx + 1; render(true) end
-            end
-            if delay > 0 then
-                overview_scroll_timer = mp.add_timeout(delay, function()
-                    step()
-                    overview_scroll_timer = mp.add_periodic_timer(ov, step)
-                end)
-            else
-                overview_scroll_timer = mp.add_periodic_timer(ov, step)
-            end
-        end
-    end
+    -- cast + synopsis marquees (see sync_marquees — a block the LEAN card omits gets no timer)
+    sync_marquees()
 
     -- live-TV "Next" marquee: just tick the index every live_upcoming_secs; the
     -- sawtooth in card.build_card maps it to a hold-scroll-hold-restart window (the
@@ -373,14 +403,35 @@ show = function(timeout)
         end
     end
 
-    if hide_timer then hide_timer:kill(); hide_timer = nil end
-    if timeout and timeout > 0 then hide_timer = mp.add_timeout(timeout, hide) end
-    msg.verbose(string.format("show (timeout=%s)", tostring(timeout or 0)))
+    arm_hide(timeout)
+    msg.verbose(string.format("show (timeout=%s, lean=%s)", tostring(timeout or 0), tostring(lean)))
 end
 
-toggle = function()
-    if visible then hide() else show(opts.toggle_timeout) end
+-- One state machine behind BOTH keys (toggle = FULL card, toggle-lean = LEAN card):
+--            |  toggle (c)              |  toggle-lean (C)
+--   hidden   |  show FULL               |  show LEAN
+--   FULL up  |  hide                    |  switch to LEAN, in place
+--   LEAN up  |  switch to FULL, in place|  hide
+-- i.e. a key hides the card only when ITS OWN variant is showing; otherwise it swaps the
+-- card to its variant WITHOUT a hide/show cycle — the overlay is replaced by one render()
+-- and the image layers (poster/banner/disc/fanart/casthead) stay up, so there's no blink.
+local function toggle_mode(want_lean)
+    if visible and lean == want_lean then hide(); return end
+    if visible then
+        lean = want_lean
+        sync_marquees() -- start/stop the marquees the new mode needs
+        render()        -- FULL render, NOT render(true): the card height (and so card_rect)
+                        -- changed, so the disc + clearlogo have to be re-placed
+        arm_hide(opts.toggle_timeout) -- a key press is interaction: restart the auto-close
+        msg.verbose("switch mode (lean=" .. tostring(lean) .. ")")
+        return
+    end
+    lean = want_lean
+    show(opts.toggle_timeout)
 end
+
+toggle = function() toggle_mode(false) end
+local function toggle_lean() toggle_mode(true) end
 
 -- Orchestration -------------------------------------------------------------
 
@@ -397,6 +448,7 @@ local function on_file_loaded()
     cur_signal = nil -- new file: drop any prior tuner reading (a fresh channel re-polls)
     cur_tech = nil   -- new file: re-read tech (resolution/codecs/…) on the next render
     casthead_active = false; images.casthead_hide() -- clear any prior cast-headshot strip
+    lean = false     -- LEAN is per-file: every new file opens on the FULL card
     content_ok = is_video_playback()
     if not content_ok then live_ctx = nil; hide(); return end -- no card for images / audio
     local path = mp.get_property("path") or mp.get_property("filename") or ""
@@ -906,6 +958,10 @@ end)
 
 local bind_key = (opts.key ~= "") and opts.key or nil
 mp.add_key_binding(bind_key, "toggle", toggle)
+-- Second key: the LEAN card. Binding NAMES may contain '-' (the literal-underscore rule
+-- applies to --script-opts KEYS, a different namespace) => script-binding spincard/toggle-lean
+local lean_bind_key = (opts.lean_key ~= "") and opts.lean_key or nil
+mp.add_key_binding(lean_bind_key, "toggle-lean", toggle_lean)
 
 -- The VO/OSD often isn't ready when a poster finishes decoding at playback
 -- start, so overlay-add would use a zero size and skip. Re-show once the OSD

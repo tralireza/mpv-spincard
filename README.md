@@ -127,12 +127,18 @@ cp -r scripts/spincard          ~/.config/mpv/scripts/
 cp    script-opts/spincard.conf ~/.config/mpv/script-opts/
 ```
 
-Bind a toggle key in `~/.config/mpv/input.conf` — use a **plain** key (over
+Bind the toggle keys in `~/.config/mpv/input.conf` — use **plain** keys (over
 tmux/SSH, `Ctrl+<letter>` collides with Tab/Enter/Esc):
 
 ```
 c script-binding spincard/toggle
+C script-binding spincard/toggle-lean
 ```
+
+`c` shows the full card; `C` shows a **lean** one — by default the same card without
+the synopsis (configurable with `lean_hide`). Each key hides the card only when its own
+variant is up; press the other key and the card switches in place. Lean is per-file: the
+next file opens on the full card again.
 
 Or push to a remote host with the included helper:
 
@@ -151,6 +157,8 @@ auto_show=yes          # show the card when a file opens
 duration=7             # auto-show timeout in seconds (0 = until toggled)
 toggle_timeout=17      # toggle-key auto-close (0 = until toggled)
 show_on_pause=no       # pop the card while paused, hide on resume
+lean_hide=overview     # blocks the LEAN card (C) omits: overview, tagline, cast, tech,
+                       #   genres, awards, rating, meta
 
 anchor=bottom          # "bottom" (hug bottom, grow up) or "top"
 pos_x=22  pos_y=22     # margin in a 1280x720 virtual space (~3%, matches the banner inset)

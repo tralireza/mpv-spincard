@@ -56,6 +56,23 @@ local function aspect_ratio(spec)
     return 16 / 9
 end
 
+-- LEAN card. opts.lean_hide lists the block NAMES the lean card omits — comma and/or
+-- whitespace separated, case-insensitive, unknown names ignored:
+--   overview tagline cast tech genres awards rating meta
+-- Memoised on the RAW string (not a one-shot "parsed" flag): build_card runs at 10 Hz
+-- under the marquees and asks ~10x per build, but init may be re-run with a different
+-- opts table (the headless tests do exactly that), so the cache key has to be the value.
+-- Exported: main.lua asks the same question to decide which marquee timers to run.
+local lean_raw, lean_set = nil, {}
+function M.lean_hidden(name)
+    local raw = tostring(opts.lean_hide or "")
+    if raw ~= lean_raw then
+        lean_raw, lean_set = raw, {}
+        for w in raw:gmatch("[^,%s]+") do lean_set[w:lower()] = true end
+    end
+    return lean_set[name] == true
+end
+
 function M.build_card(c)
     if not c then return "" end
     -- snapshot the card state read below into plain locals (via deps getters) so the
@@ -68,6 +85,11 @@ function M.build_card(c)
     -- the cast-headshot strip (a desktop overlay) replaces the text cast when active;
     -- getter may be absent in a headless test stub, so guard it.
     local casthead_active = deps.casthead_active and deps.casthead_active()
+    -- LEAN card (the toggle-lean key): omit the lean_hide blocks. Same nil-safe idiom as
+    -- casthead_active — an older/headless deps stub has no `lean` getter, so hidden() is
+    -- always false there and the FULL card renders exactly as before.
+    local lean = deps.lean and deps.lean()
+    local function hidden(nm) return lean and M.lean_hidden(nm) end
     local logo_rect, card_rect
     local x, y, pad = opts.pos_x, opts.pos_y, layout.PAD
     -- the disc now nestles at the card's TOP-RIGHT corner (pokes out to the right),
@@ -249,8 +271,12 @@ function M.build_card(c)
             if c.channel and c.channel ~= "" then
                 line(ellipsize_px(c.channel, fitw, 24), 24, "00D7FF")   -- channel stays on the subline
             end
-            cy = cy + 6
-            line("[No program information]", 21, "A0A0A0", false, true) -- synopsis slot
+            -- the note IS the synopsis slot, so the LEAN card's `overview` drops it too
+            -- (keeps live TV consistent with the other three kinds)
+            if not hidden("overview") then
+                cy = cy + 6
+                line("[No program information]", 21, "A0A0A0", false, true) -- synopsis slot
+            end
             -- Countdown "progress" bar to the next programme. We know `now` and the
             -- next entry's start, but NOT the gap's start (TVH's grid never returns the
             -- just-ended programme), so this is an imminence gauge over a 1h lookahead:
@@ -274,7 +300,7 @@ function M.build_card(c)
                 sub = (sub ~= "" and (sub .. "   \226\128\162   ") or "") .. c.subtitle
             end
             if sub ~= "" then line(ellipsize_px(sub, fitw, 24), 24, "00D7FF") end
-            if c.overview and c.overview ~= "" then
+            if c.overview and c.overview ~= "" and not hidden("overview") then
                 cy = cy + 6
                 render_overview(c.overview, 4, false)
             end
@@ -442,11 +468,13 @@ function M.build_card(c)
         end
         logo_rect = { x = x + pad, y = cy, h = band }
         cy = cy + band + LOGO_GAP -- clear the logo band (autocrop makes band == artwork)
-        -- movie's year is folded into the meta line below (bold); TV/unknown keep it here
-        if c.kind ~= "movie" and c.year and c.year ~= "" then line(tostring(c.year), 21, "B4B4B4") end
+        -- movie's year is folded into the meta line below (bold); TV/unknown keep it here.
+        -- A LEAN card hiding `meta` has no meta line, so the movie takes its year back —
+        -- else the year would vanish on movies only (the 4 kinds must stay consistent).
+        if (c.kind ~= "movie" or hidden("meta")) and c.year and c.year ~= "" then line(tostring(c.year), 21, "B4B4B4") end
     else
         local head = c.title or "Unknown"
-        if c.kind ~= "movie" and c.year and c.year ~= "" then head = head .. "  (" .. c.year .. ")" end
+        if (c.kind ~= "movie" or hidden("meta")) and c.year and c.year ~= "" then head = head .. "  (" .. c.year .. ")" end
         -- Big 38px title, shrunk to 28px when it wouldn't fit one line, wrapped to
         -- <=3 lines. The "unknown" card's raw file name is kept to ONE line instead
         -- (tail-ellipsised at a separator — a long dotted name reads poorly wrapped).
@@ -454,7 +482,7 @@ function M.build_card(c)
     end
 
     -- tagline (italic)
-    if c.tagline and c.tagline ~= "" then line(c.tagline, 21, "A0A0A0", false, true) end
+    if c.tagline and c.tagline ~= "" and not hidden("tagline") then line(c.tagline, 21, "A0A0A0", false, true) end
 
     -- Two compact fields, inline vs own-line: credits (director/studio) go inline
     -- (parens on the TV subline / on the movie meta line); genres get their own line
@@ -494,7 +522,7 @@ function M.build_card(c)
     end
     -- meta_str = aired · runtime · cert (· box) — used by the TV genre+meta row. The MOVIE
     -- meta line below builds its own LEFT/RIGHT clusters straight from `c` (not this list).
-    local meta_str = (#meta > 0) and table.concat(meta, "   \226\128\162   ") or nil
+    local meta_str = (#meta > 0 and not hidden("meta")) and table.concat(meta, "   \226\128\162   ") or nil
 
     -- MOVIE/unknown: meta line ABOVE the rating, split into TWO clusters on ONE row, joined
     -- by a condensed " • " bullet. LEFT (\an7, inner-left): bold (YYYY) + runtime + BOLD
@@ -502,7 +530,8 @@ function M.build_card(c)
     -- studio (grey otherwise). Year is bold-folded here (dropped from the heading). Both
     -- events share \bord2\shad1\3c styling; per-field colour/weight is set with inline tags,
     -- so widths are budgeted from PLAIN text (the director — the variable field — ellipsises).
-    if c.kind ~= "tv" then
+    -- the two clusters share ONE row (a single cy advance), so the LEAN card hides them together
+    if c.kind ~= "tv" and not hidden("meta") then
         local mfs, BULL = 21, " \226\128\162 "
         local GREY, GOLD = "B4B4B4", "18C5F5"
         local function bold(s) return "{\\b1}" .. ass_escape(s) .. "{\\b0}" end
@@ -566,7 +595,9 @@ function M.build_card(c)
     elseif tmdb_s and tmdb_s > 0 then
         hscore, hlabel = tmdb_s, c.rating_src -- "TMDB", or nil for a bare .nfo rating (no pill)
     end
-    if hscore then
+    -- LEAN `rating` drops the whole row: the stars AND the right-aligned TMDB/RT/MC
+    -- cluster (they share `ry` and the single cy advance — pills alone would float).
+    if hscore and not hidden("rating") then
         local stars, scolor = star_rating(hscore)
         local ry = cy
         local rtxt = string.format("%s  %.1f", stars, hscore)
@@ -619,8 +650,11 @@ function M.build_card(c)
 
     -- genres (bold grey) + the OMDb award highlight (gold ★, leading clause; rare on TV).
     local gfs = 21
-    local gstr = (c.genres and #c.genres > 0) and genres_str(c) or nil
-    local astr = (c.awards and c.awards ~= "")
+    -- LEAN gates the SOURCES, not the drawing: the rows below are already a truth table
+    -- over gstr/meta_str/astr (incl. "emit nothing, not even the cy+4, when all are nil"),
+    -- so nulling them here gives correct spacing for free.
+    local gstr = (c.genres and #c.genres > 0 and not hidden("genres")) and genres_str(c) or nil
+    local astr = (c.awards and c.awards ~= "" and not hidden("awards"))
         and ("\226\152\133 " .. (c.awards:match("^[^.]+") or c.awards)) or nil
 
     local right_x = x + pad + innerw -- card inner right edge (right-align anchor for \an9)
@@ -669,7 +703,7 @@ function M.build_card(c)
     -- advanced one line every overview_scroll_secs (see show()), wrapping.
     -- Wrap by PIXELS to innerw (like the cast line) so lines fill the full card
     -- width to the right edge, not a rough 74-char guess.
-    if c.overview and c.overview ~= "" then
+    if c.overview and c.overview ~= "" and not hidden("overview") then
         cy = cy + 6
         local olines = math.max(1, tonumber(opts.overview_lines) or 3)
         if cap then
@@ -681,8 +715,10 @@ function M.build_card(c)
             -- playback (percent-pos>0) — else it appearing a few seconds in would reflow
             -- the synopsis line count. The reserve is an UPPER bound: over-reserving only
             -- costs a synopsis line, under-reserving would overflow the footer.
+            -- Skip a block the LEAN card omits: reserving for something that never draws
+            -- would trim the synopsis to make room for nothing.
             local reserve = 0
-            if c.cast and #c.cast > 0 and not casthead_active then
+            if c.cast and #c.cast > 0 and not casthead_active and not hidden("cast") then
                 local clh = math.floor((tonumber(opts.cast_fs) or 21) * 1.25)
                 local cdir = tostring(opts.cast_scroll_dir or "horizontal"):lower()
                 if opts.cast_scroll and cdir ~= "vertical" then
@@ -693,7 +729,10 @@ function M.build_card(c)
                     reserve = reserve + 4 + clh * 2                                  -- packed <=2 rows
                 end
             end
-            if opts.show_tech then reserve = reserve + 34 + 28 + 33 end              -- tech pills + tech line + progress row
+            if opts.show_tech then
+                reserve = reserve + 33                                               -- progress row (survives LEAN `tech`)
+                if not hidden("tech") then reserve = reserve + 34 + 28 end            -- + tech pills + tech line
+            end
             local budget = cap - pad - (cy - y) - reserve
             olines = math.max(1, math.min(olines, math.floor(budget / 26)))         -- render_overview line = floor(21*1.25)=26
         end
@@ -706,7 +745,7 @@ function M.build_card(c)
     -- single line gliding left; ="vertical" → a fixed cast_lines×cast_cols grid
     -- scrolled a row at a time; cast_scroll off → comma-packed onto ≤2 rows. The
     -- scrolling layouts read cast_scroll_idx (stepped on a timer in show()).
-    if c.cast and #c.cast > 0 and not casthead_active then
+    if c.cast and #c.cast > 0 and not casthead_active and not hidden("cast") then
         local fs = tonumber(opts.cast_fs) or 21
         local cbold = opts.cast_bold ~= false
         local nmax = math.max(1, tonumber(opts.cast_max) or 5)
@@ -794,7 +833,7 @@ function M.build_card(c)
     end
 
     -- local file details — read live from mpv properties at render time
-    if opts.show_tech then
+    if opts.show_tech and not hidden("tech") then
         local tt = deps.tech()
 
         -- pill badges: resolution · HDR · video codec · audio codec · channels ·
@@ -847,9 +886,13 @@ function M.build_card(c)
             full = join(subs)
         end
         if full ~= "" then cy = cy + 6; line(full, fs, "8C8C8C") end
+    end
 
-        -- progress bar + caption on ONE line: bar left, "cur / total  [ends HH:MM]"
-        -- caption to its right (drawn by the shared progress_row helper).
+    -- progress bar + caption on ONE line: bar left, "cur / total  [ends HH:MM]"
+    -- caption to its right (drawn by the shared progress_row helper). Deliberately NOT
+    -- part of the LEAN `tech` block: it's the playback position, not a file spec, and
+    -- it's the analogue of the live-TV "now" bar that the lean card also keeps.
+    if opts.show_tech then
         local pct = mp.get_property_number("percent-pos")
         if pct and pct > 0.5 and pct < 99.5 then
             local rem, tp = mp.get_property_number("time-remaining"), mp.get_property_number("time-pos")
