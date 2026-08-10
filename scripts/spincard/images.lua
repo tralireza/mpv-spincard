@@ -798,7 +798,7 @@ local function casthead_labels_draw(x0, y0, scale, o, W_disp)
             -- still trims a label that straddles an edge).
             if dx >= x0 and dx <= right then
                 local L = labels[i]
-                local function e(t) return util.ass_escape(util.ellipsize_px(t, wv, fs, "-")) end
+                local function e(t) return util.ass_escape(util.ellipsize_px(t, wv, fs, "-", true)) end
                 -- name on ONE line (ellipsised to the cell), then the role on a
                 -- 2nd, dimmer line (no parens). Truncation marker is "-".
                 local txt = e(L.name or "")
@@ -938,7 +938,7 @@ function M.casthead_show()
             local yv = (y0 + dh + math.floor(oh * 0.008)) / sy
             local wv = dw / sx
             -- name on one line, ellipsised to the head width.
-            local function esc(t) return util.ass_escape(util.ellipsize_px(t, wv, 16)) end
+            local function esc(t) return util.ass_escape(util.ellipsize_px(t, wv, 16, nil, true)) end
             local label = esc(h.name)
             events[#events + 1] = string.format(
                 "{\\an8\\pos(%d,%d)\\bord2\\shad1\\3c&H000000&\\1c&HFFFFFF&\\fs16\\b1}%s",

@@ -41,7 +41,9 @@ local cards = {
     tv      = mk{ kind = "tv", title = "ZTITLEZ Show", year = "2025", season = 1, episode = 2,
                   episode_title = "ZEPZ Episode", ep_total = 10 },
     livetv  = mk{ kind = "livetv", title = "ZTITLEZ Prog", channel = "ZCHANZ", subtitle = "ZSUBZ sub" },
-    unknown = mk{ kind = "unknown", title = "ZTITLEZ file.mkv" },
+    -- a LONG dotted release name, so the audit actually exercises heading()'s
+    -- 38 -> 28 font drop (the short "ZTITLEZ file.mkv" never tripped it)
+    unknown = mk{ kind = "unknown", title = "ZTITLEZ.01.Isle.of.Man.TT.2026x03.RST.Superbike.TT.mp4" },
 }
 
 local elems = { "ZTAGZ", "ZGENREZ", "ZCASTZ", "ZOVWZ", "ZEPZ", "ZSUBZ" }

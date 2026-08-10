@@ -106,12 +106,23 @@ function M.build_card(c)
         local ratio = aspect_ratio(opts.card_aspect)
         cap = ratio and math.floor(layout.CARD_W / ratio + 0.5) or nil
     end
-    -- text_w over-estimates the OSD sans (~0.6*fs/glyph vs the real ~0.5), so
-    -- fitting text to exactly innerw stops ~a word early and leaves empty space on
-    -- the right. Fit to this compensated width instead (~1.22x, the measured ratio)
-    -- so lines reach the real card edge — typical prose stays in; a caps-heavy run
-    -- may reach a touch further. Shared by heading(), the sub line, and the overview.
-    local fitw = math.floor(innerw * 1.22)
+    -- Text-fit budget, in the SAME (real) pixel space as innerw. util.text_w now sums
+    -- MEASURED DejaVu Sans advances (regular + bold tables) instead of the old guessed
+    -- weights, so there is no ~1.22x over-estimate left to compensate for and no
+    -- innerw*1.22 fudge — a run measured at fitw really is that wide on screen. The
+    -- 12 px reserve is not a fudge factor: the estimator sums advances, so it can still
+    -- under-shoot the rendered bbox by the antialias fringe + side bearings (worst
+    -- MEASURED 8.5 px over the Latin corpus) plus ~2-3 px for the \bord2\shad1 outline
+    -- on the right. 12 px covers both and still lands inside the card's 24 px pad.
+    -- Scope, honestly: that 8.5 px is an empirical worst case over the ASCII/Latin-1 set
+    -- that was measured against libass, NOT a proof. Glyphs with no measured entry ride
+    -- util.lua's block-aware fallbacks, which deliberately over-predict (+0..13%), and
+    -- kerning-heavy runs (To, Wa, AV) over-predict too — both are the safe direction.
+    -- The tables are DejaVu Sans, i7's fc-match for mpv's default sans; another box with
+    -- a different sans is unverified (still far better than the old guessed weights).
+    -- Shared by heading(), the sub line, the overview, the cast/tech fits and the
+    -- meta-line budgets — one space throughout.
+    local fitw = innerw - 12
 
     -- fade alpha for a given base alpha (00 = opaque), scaled by anim_fade (0..1)
     local function fa(base)
@@ -173,11 +184,11 @@ function M.build_card(c)
     local function heading(str, big, small, maxlines, ellip)
         if not str or str == "" then return end
         small = small or big
-        local fs = (text_w(str, big) > fitw) and small or big
+        local fs = (text_w(str, big, true) > fitw) and small or big
         if ellip then
-            line(ellipsize_px(str, fitw, fs), fs, "FFFFFF", true)
+            line(ellipsize_px(str, fitw, fs, nil, true), fs, "FFFFFF", true)
         else
-            for _, hl in ipairs(wrap_px(str, fitw, fs, math.max(1, maxlines or 1))) do
+            for _, hl in ipairs(wrap_px(str, fitw, fs, math.max(1, maxlines or 1), true)) do
                 line(hl, fs, "FFFFFF", true)
             end
         end
@@ -392,7 +403,7 @@ function M.build_card(c)
             end
             local function pill(s, bg, fg)
                 local padx, ph = 8, tfs + 8
-                local pw = math.floor(text_w(s, tfs) + 2 * padx)
+                local pw = math.floor(text_w(s, tfs, true) + 2 * padx)
                 pill_badge{ bx = cx, by = y0 - 4, ty = y0, pw = pw, ph = ph, rad = 7,
                     bg = bg, fg = fg, fs = tfs, padx = padx, text = s }
                 cx = cx + pw + 8
@@ -413,16 +424,17 @@ function M.build_card(c)
         if c.upcoming and #c.upcoming > 0 then
             cy = cy + 6
             line("Next", 18, "00D7FF", true)
-            -- Fit each row to the card's inner width rather than a fixed char
-            -- count. The OSD sans font averages ~0.5*fs px per glyph (matches
-            -- the overview wrap's 74 chars @ fs22); mpv exposes no text-measure
-            -- API, so this is an estimate and wrap() still ellipsizes overruns.
+            -- Each row is fitted in REAL px like every other row. This used to be a
+            -- character budget (innerw / (fs*0.5)) fed to wrap(), which let a caps-heavy
+            -- EPG title — common on some feeds — render past the inner edge: 72 chars of
+            -- "MOTD2 EXTRA: PREMIER LEAGUE HIGHLIGHTS..." fits an 90-char budget but is
+            -- 8.9px too wide. The pinned row draws \b1 and the scrolled rest regular, so
+            -- the weight is passed through; the HH:MM prefix is always regular.
             local fs = 18
-            local budget = math.floor(innerw / (fs * 0.5))
-            local function up_line(up)
+            local function up_line(up, isbold)
                 local pfx = up.start and (os.date("%H:%M", up.start) .. "   ") or ""
-                local title = wrap(up.title, math.max(8, budget - #pfx), 1)[1] or up.title
-                return pfx .. title
+                local room = fitw - text_w(pfx, fs, false)
+                return pfx .. ellipsize_px(up.title, math.max(40, room), fs, nil, isbold)
             end
             -- The imminent programme (c.upcoming[1]) is PINNED to the top row, drawn
             -- white + bold as a fixed reference. The rest of the pool scrolls UP one
@@ -442,18 +454,18 @@ function M.build_card(c)
                 local rows_fit = math.floor((cap - pad - (cy - y)) / (fs > 0 and math.floor(fs * 1.25) or 22))
                 win = math.max(1, math.min(win, rows_fit))
             end
-            line(up_line(c.upcoming[1]), fs, "FFFFFF", true) -- pinned imminent programme
+            line(up_line(c.upcoming[1], true), fs, "FFFFFF", true) -- pinned imminent programme
             local rest, sw = pool - 1, win - 1               -- c.upcoming[2..pool]
             if rest > 0 and sw > 0 then
                 if rest <= sw then
-                    for i = 2, pool do line(up_line(c.upcoming[i]), fs, "8C8C8C") end
+                    for i = 2, pool do line(up_line(c.upcoming[i], false), fs, "8C8C8C") end
                 else
                     local mx = rest - sw -- last start; window then shows the final rows
                     local secs = math.max(0.001, tonumber(opts.live_upcoming_secs) or 1)
                     local th = math.max(1, math.floor((tonumber(opts.live_upcoming_delay) or 0) / secs + 0.5)) -- top-hold steps
                     local v = upnext_scroll_idx % (th + mx)
                     local start = (v < th) and 0 or (v - th + 1) -- hold top th steps, then scroll 1..mx (end shows 1 step)
-                    for k = 0, sw - 1 do line(up_line(c.upcoming[2 + start + k]), fs, "8C8C8C") end
+                    for k = 0, sw - 1 do line(up_line(c.upcoming[2 + start + k], false), fs, "8C8C8C") end
                 end
             end
         end
@@ -481,8 +493,13 @@ function M.build_card(c)
         heading(head, 38, 28, 3, c.kind == "unknown")
     end
 
-    -- tagline (italic)
-    if c.tagline and c.tagline ~= "" and not hidden("tagline") then line(c.tagline, 21, "A0A0A0", false, true) end
+    -- tagline (italic), tail-ellipsised to ONE line: TMDB taglines run past 100 chars often
+    -- enough to walk off the card, and this was the last body field drawn with no width fit
+    -- at all. Regular weight — DejaVu's oblique advances are identical to Book, so italic
+    -- needs no separate table. One line (not wrapped) keeps the card height unchanged.
+    if c.tagline and c.tagline ~= "" and not hidden("tagline") then
+        line(ellipsize_px(c.tagline, fitw, 21), 21, "A0A0A0", false, true)
+    end
 
     -- Two compact fields, inline vs own-line: credits (director/studio) go inline
     -- (parens on the TV subline / on the movie meta line); genres get their own line
@@ -538,24 +555,34 @@ function M.build_card(c)
         local yr = (c.kind == "movie" and c.year and c.year ~= "") and ("(" .. c.year .. ")") or nil
         local runtime_str = (c.runtime and tonumber(c.runtime)) and string.format("%d min", c.runtime) or nil
         local dir_str = (c.director and c.director ~= "") and c.director or nil
-        -- RIGHT: cert (grey) • $box (gold+bold) • studio (grey). Rendered + plain in lockstep.
-        local rparts, rplain = {}, {}
-        if c.mpaa and c.mpaa ~= "" then rparts[#rparts + 1] = ass_escape(c.mpaa); rplain[#rplain + 1] = c.mpaa end
+        -- Both clusters are MIXED weight: only the year, the box office and the director
+        -- render \b1 — cert, runtime, studio and every bullet are regular. So each run is
+        -- measured at ITS OWN weight (add() takes the rendered body, the plain text and the
+        -- weight, and folds in a regular-weight bullet as it goes). Measuring a whole
+        -- cluster bold over-books the reserve by ~52px and needlessly truncates the
+        -- director — the one elastic field on this row.
+        local function accum(parts, body, plain, isbold, w)
+            if #parts > 0 then w = w + text_w(BULL, mfs, false) end
+            parts[#parts + 1] = body
+            return w + text_w(plain, mfs, isbold)
+        end
+        -- RIGHT: cert (grey) • $box (gold+bold) • studio (grey). Rendered + measured in lockstep.
+        local rparts, rw = {}, 0
+        if c.mpaa and c.mpaa ~= "" then rw = accum(rparts, ass_escape(c.mpaa), c.mpaa, false, rw) end
         local bo = fmt_money(c.boxoffice)
-        if bo then rparts[#rparts + 1] = "{\\1c&H" .. GOLD .. "&}" .. bold(bo) .. "{\\1c&H" .. GREY .. "&}"; rplain[#rplain + 1] = bo end
-        if c.studio and c.studio ~= "" then rparts[#rparts + 1] = ass_escape(c.studio); rplain[#rplain + 1] = c.studio end
+        if bo then rw = accum(rparts, "{\\1c&H" .. GOLD .. "&}" .. bold(bo) .. "{\\1c&H" .. GREY .. "&}", bo, true, rw) end
+        if c.studio and c.studio ~= "" then rw = accum(rparts, ass_escape(c.studio), c.studio, false, rw) end
         local right_body = (#rparts > 0) and table.concat(rparts, ass_escape(BULL)) or nil
-        local rw = (#rplain > 0) and text_w(table.concat(rplain, BULL), mfs) or 0
-        -- LEFT: bold year + runtime + bold director. Fixed (year+runtime) prefix, then the
-        -- director ellipsised to the room before the right cluster — in fitw space (text_w
-        -- over-estimates ~1.22x, fitw = innerw*1.22 → reserve the right cluster + a 24px gap).
-        local lparts, lplain = {}, {}
-        if yr then lparts[#lparts + 1] = bold(yr); lplain[#lplain + 1] = yr end
-        if runtime_str then lparts[#lparts + 1] = ass_escape(runtime_str); lplain[#lplain + 1] = runtime_str end
+        -- LEFT: bold year • runtime • bold director. Fixed (year+runtime) prefix, then the
+        -- director ellipsised to the room before the right cluster. All terms are in the
+        -- SAME real-px space (fitw): right cluster + prefix + its bullet + a 24px gap.
+        local lparts, usedw = {}, 0
+        if yr then usedw = accum(lparts, bold(yr), yr, true, usedw) end
+        if runtime_str then usedw = accum(lparts, ass_escape(runtime_str), runtime_str, false, usedw) end
         if dir_str then
-            local usedw = (#lplain > 0) and text_w(table.concat(lplain, BULL) .. BULL, mfs) or 0
-            dir_str = ellipsize_px(dir_str, math.max(40, fitw - rw - 24 - usedw), mfs)
-            lparts[#lparts + 1] = bold(dir_str)
+            local pre = usedw + ((#lparts > 0) and text_w(BULL, mfs, false) or 0)
+            dir_str = ellipsize_px(dir_str, math.max(40, fitw - rw - 24 - pre), mfs, nil, true)
+            usedw = accum(lparts, bold(dir_str), dir_str, true, usedw)
         end
         local left_body = (#lparts > 0) and table.concat(lparts, ass_escape(BULL)) or nil
         if left_body or right_body then
@@ -610,7 +637,7 @@ function M.build_card(c)
         -- both TMDB and IMDb are shown) is right-aligned to the card's inner edge.
         local pfs, ppadx = 15, 9
         local function pill_text(label, score) return score and string.format("%s %.1f", label, score) or label end
-        local function pill_w(label, score) return math.floor(text_w(pill_text(label, score), pfs) + 2 * ppadx) end
+        local function pill_w(label, score) return math.floor(text_w(pill_text(label, score), pfs, true) + 2 * ppadx) end
         local function draw_pill(label, score, px)
             local bg, fg = "E4B401", "FFFFFF"
             if label == "IMDb" then bg, fg = "18C5F5", "000000" end
@@ -635,7 +662,7 @@ function M.build_card(c)
         if #right > 0 then
             local gap, total, widths = 8, 0, {}
             for i, p in ipairs(right) do
-                widths[i] = math.floor(text_w(p.text, pfs) + 2 * ppadx)
+                widths[i] = math.floor(text_w(p.text, pfs, true) + 2 * ppadx)
                 total = total + widths[i] + (i > 1 and gap or 0)
             end
             local px = x + pad + innerw - total -- right-align the whole cluster
@@ -662,19 +689,20 @@ function M.build_card(c)
         -- TV: fold the meta line and the genre row into ONE dense row — genres LEFT (bold),
         -- the meta facts (aired/runtime/mpaa/…) RIGHT-aligned (grey) via \an9 (libass aligns
         -- exactly to the edge — no text_w gap), award (rare) a gold ★ at the far right.
-        local aw = astr and text_w(astr, gfs) or 0 -- estimate: only spaces the meta left of an award
+        local aw = astr and text_w(astr, gfs) or 0 -- award renders REGULAR: spaces the meta left of it
         if gstr then
             cy = cy + 4
             if astr then content[#content + 1] = text_run(right_x, cy, astr, gfs, "18C5F5", { alpha = fa(0), an = 9 }) end
             if meta_str then content[#content + 1] = text_run(right_x - (astr and (aw + 16) or 0), cy, meta_str, gfs, "B4B4B4", { alpha = fa(0), an = 9 }) end
-            -- genres fill the left; ellipsise conservatively (text_w over-estimates → safe gap)
-            local budget = innerw - (meta_str and text_w(meta_str, gfs) or 0) - (astr and (aw + 16) or 0) - 16
-            content[#content + 1] = text_run(x + pad, cy, ellipsize_px(gstr, math.max(40, budget), gfs), gfs, "DCDCDC", { alpha = fa(0), bold = true })
+            -- genres fill the left. All terms are real px now (no over-estimate slack to lean
+            -- on), so the separation is the EXPLICIT 16 px gap; genres measure bold (\b1).
+            local budget = fitw - (meta_str and text_w(meta_str, gfs) or 0) - (astr and (aw + 16) or 0) - 16
+            content[#content + 1] = text_run(x + pad, cy, ellipsize_px(gstr, math.max(40, budget), gfs, nil, true), gfs, "DCDCDC", { alpha = fa(0), bold = true })
             cy = cy + math.floor(gfs * 1.25)
         elseif meta_str or astr then -- no genres → meta stays LEFT (award right if present)
             cy = cy + 4
             if astr then content[#content + 1] = text_run(right_x, cy, astr, gfs, "18C5F5", { alpha = fa(0), an = 9 }) end
-            if meta_str then content[#content + 1] = text_run(x + pad, cy, ellipsize_px(meta_str, astr and math.max(40, innerw - aw - 16) or fitw, gfs), gfs, "B4B4B4", { alpha = fa(0) }) end
+            if meta_str then content[#content + 1] = text_run(x + pad, cy, ellipsize_px(meta_str, astr and math.max(40, fitw - aw - 16) or fitw, gfs), gfs, "B4B4B4", { alpha = fa(0) }) end
             cy = cy + math.floor(gfs * 1.25)
         end
     else
@@ -685,11 +713,11 @@ function M.build_card(c)
             cy = cy + 4
             content[#content + 1] = text_run(right_x, cy, astr, gfs, "18C5F5", { alpha = fa(0), an = 9 }) -- award right
             content[#content + 1] = text_run(x + pad, cy,
-                ellipsize_px(gstr, math.max(40, innerw - text_w(astr, gfs) - 16), gfs), gfs, "DCDCDC", { alpha = fa(0), bold = true })
+                ellipsize_px(gstr, math.max(40, fitw - text_w(astr, gfs) - 16), gfs, nil, true), gfs, "DCDCDC", { alpha = fa(0), bold = true })
             cy = cy + math.floor(gfs * 1.25)
         elseif gstr then
             cy = cy + 4
-            content[#content + 1] = text_run(x + pad, cy, ellipsize_px(gstr, fitw, gfs), gfs, "DCDCDC", { alpha = fa(0), bold = true })
+            content[#content + 1] = text_run(x + pad, cy, ellipsize_px(gstr, fitw, gfs, nil, true), gfs, "DCDCDC", { alpha = fa(0), bold = true })
             cy = cy + math.floor(gfs * 1.25)
         elseif astr then
             cy = cy + 4
@@ -756,7 +784,7 @@ function M.build_card(c)
             local role = (type(e) == "table") and e.role or nil
             if nm and nm ~= "" then
                 local s = (role and role ~= "") and (nm .. " (" .. role .. ")") or nm
-                entries[#entries + 1] = ellipsize_px(s, fitw, fs)
+                entries[#entries + 1] = ellipsize_px(s, fitw, fs, nil, cbold)
             end
         end
         local cdir = tostring(opts.cast_scroll_dir or "horizontal"):lower()
@@ -767,13 +795,13 @@ function M.build_card(c)
             -- by a gap, offset wrapped by the period width (fits => drawn static).
             cy = cy + 4
             local full = table.concat(entries, ", ")
-            if text_w(full, fs) <= fitw then
+            if text_w(full, fs, cbold) <= fitw then
                 line(full, fs, "00D7FF", cbold) -- fits: static, no scroll (advances cy)
             else
                 local lineh = math.floor(fs * 1.25)
                 local px = math.max(1, tonumber(opts.cast_scroll_px) or 3)
                 local gap = "     \226\128\162     " -- "   •   " spacer between copies
-                local period = text_w(full .. gap, fs)
+                local period = text_w(full .. gap, fs, cbold)
                 local text = full .. gap .. full   -- 2nd copy keeps the window filled
                 local off = (cast_scroll_idx * px) % period
                 content[#content + 1] = string.format(
@@ -797,7 +825,7 @@ function M.build_card(c)
             local start = scroll and ((cast_scroll_idx * ncols) % pool) or 0
             -- draw one cell at column dx, current cy, without advancing cy
             local function cell(str, dx)
-                str = ellipsize_px(str, colw - gut, fs)
+                str = ellipsize_px(str, colw - gut, fs, nil, cbold)
                 content[#content + 1] = text_run(x + pad + dx, cy, str, fs, "00D7FF", { alpha = fa(0), bold = cbold })
             end
             for r = 0, nlines - 1 do
@@ -816,7 +844,7 @@ function M.build_card(c)
             local rows, cur = {}, ""
             for _, s in ipairs(entries) do
                 local piece = (cur == "") and s or (cur .. ", " .. s)
-                if cur ~= "" and text_w(piece, fs) > fitw then
+                if cur ~= "" and text_w(piece, fs, cbold) > fitw then
                     rows[#rows + 1] = cur .. ","
                     cur = s
                     if #rows >= 2 then break end
@@ -855,7 +883,7 @@ function M.build_card(c)
             local ph, pfs, ppadx, pgap = 26, 16, 10, 8
             local px = x + pad
             for _, p in ipairs(pills) do
-                local pw = math.floor(text_w(p.t, pfs) + 2 * ppadx) -- text_w, like the other pills
+                local pw = math.floor(text_w(p.t, pfs, true) + 2 * ppadx) -- bold: pill labels render \b1
                 pill_badge{ bx = px, by = cy, ty = cy + 5, pw = pw, ph = ph, rad = 8,
                     bg = p.bg, fg = p.fg, fs = pfs, padx = ppadx, text = p.t }
                 px = px + pw + pgap
