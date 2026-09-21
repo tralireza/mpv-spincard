@@ -43,6 +43,15 @@ M.fanart_fetch = fanart.fetch_art
 local TMDB_IMG = "https://image.tmdb.org/t/p/"
 local IMG_CACHE = util.path(util.home(), ".cache", "spincard", "img")
 util.mkdir_p(IMG_CACHE)
+-- Per-CALL, not per-process: one file load can fetch the same profile twice
+-- concurrently (two casthead prepares), and a shared temp means two curls write
+-- one file and both rename it — publishing a half-written image into the
+-- persistent cache, which then fails to decode on every later play.
+local fetch_seq = 0
+local function tmp_path(dest)
+    fetch_seq = fetch_seq + 1
+    return dest .. "." .. (mp.get_property("pid") or "x") .. "." .. fetch_seq .. ".part"
+end
 local function img_cache_path(size, path)
     return util.path(IMG_CACHE, size .. "_" .. (path:gsub("[^%w%-_.]", "_")))
 end
@@ -51,7 +60,7 @@ function M.fetch_image(path, size, _tag, cb)
     local dest = img_cache_path(size, path)
     local fi = utils.file_info(dest)
     if fi and fi.size and fi.size > 0 then return cb(dest) end -- cache hit: no download
-    local tmp = dest .. "." .. (mp.get_property("pid") or "x") .. ".part"
+    local tmp = tmp_path(dest)
     local url = TMDB_IMG .. size .. path
     mp.command_native_async({ name = "subprocess", playback_only = false,
         args = { "curl", "-fsSL", "--max-time", "15", "-o", tmp, url } },
@@ -74,7 +83,7 @@ function M.fetch_url(url, _tag, cb)
     local dest = img_cache_path("url", url)
     local fi = utils.file_info(dest)
     if fi and fi.size and fi.size > 0 then return cb(dest) end -- cache hit: no download
-    local tmp = dest .. "." .. (mp.get_property("pid") or "x") .. ".part"
+    local tmp = tmp_path(dest)
     mp.command_native_async({ name = "subprocess", playback_only = false,
         args = { "curl", "-fsSL", "--max-time", "15", "-o", tmp, url } },
         function(ok, res)
@@ -544,9 +553,17 @@ local casthead = {
     scroll_idx = 0, scroll_timer = nil, wrap_shown = false, -- marquee offset, timer, seam-overlay state
     labels = nil, -- scroll style: [i] = {name, role} in lockstep with the packed faces
     shown = false,
-    token = 0,    -- bumped per prepare(); async cbs bail on a stale token
+    token = 0,    -- current prepare's seq; async cbs of a superseded prepare bail
 }
 M.casthead = casthead
+-- One file load fires casthead_prepare TWICE when a cached card already carries
+-- cast and the cache is stale (main fires it at load and again from the do_tmdb
+-- callback), so the supersession token must be per-PREPARE. It used to be the file
+-- generation, which is identical for both — so neither was suppressed, both ran
+-- ffmpeg over the same output path, and the loser reported 0 faces, which the
+-- caller reads as "no faces decoded" and answers by restoring the text cast.
+local prepare_seq = 0
+local last_prep = { gen = nil, sig = nil, state = nil } -- "inflight" | "ok" | "fail"
 local CAST_DECODE_H = 160 -- head native height (square); scaled to OSD at draw
 
 -- SCROLL style: pack all fetched faces into ONE wide premultiplied BGRA (square
@@ -591,17 +608,28 @@ local function casthead_build_packed(files, token, cb)
     args[#args + 1] = "-frames:v"; args[#args + 1] = "1"
     args[#args + 1] = "-pix_fmt"; args[#args + 1] = "bgra"
     args[#args + 1] = "-f"; args[#args + 1] = "rawvideo"
-    args[#args + 1] = casthead.packed.file
+    -- Write to a per-prepare temp, then publish. Two prepares sharing one output
+    -- path meant the later ffmpeg truncated (-y) the file the earlier one was
+    -- still writing, so the earlier callback stat'd 0 bytes and reported cb(0).
+    local out = casthead.packed.file .. "." .. token .. ".part"
+    args[#args + 1] = out
     mp.command_native_async({ name = "subprocess", playback_only = false, args = args }, function(ok, res)
-        if not ok or not res or res.status ~= 0 then msg.warn("casthead pack failed"); return cb(0) end
-        local fi = utils.file_info(casthead.packed.file)
-        if not fi or not fi.size or fi.size == 0 then return cb(0) end
+        -- Superseded: say nothing. cb(0) is the caller's "no faces decoded"
+        -- signal and would wrongly restore the card's text cast.
+        if casthead.token ~= token then os.remove(out); return end
+        if not ok or not res or res.status ~= 0 then
+            os.remove(out); msg.warn("casthead pack failed"); return cb(0)
+        end
+        local fi = utils.file_info(out)
+        if not fi or not fi.size or fi.size == 0 then os.remove(out); return cb(0) end
+        os.remove(casthead.packed.file) -- rename won't overwrite on Windows
+        os.rename(out, casthead.packed.file)
         casthead.packed.face_h = H  -- face height within the row (excludes the shadow band)
         casthead.packed.h = HP      -- full packed height (faces + shadow band)
         casthead.packed.w = math.floor(fi.size / (4 * HP))
-        casthead.packed.ready = (casthead.token == token)
+        casthead.packed.ready = true
         msg.verbose(string.format("casthead packed %dx%d (%d faces)", casthead.packed.w, HP, n))
-        cb(casthead.token == token and n or 0)
+        cb(n)
     end)
 end
 
@@ -632,7 +660,33 @@ end
 -- the whole batch settles (only fires for the current token). Reuses fetch_image
 -- (persistent w185 cache) + png_decode (square crop, opaque). Orchestrated here so
 -- on_file_loaded stays a single images.* call (LuaJIT 60-upvalue ceiling).
-function M.casthead_prepare(cast, token, cb)
+-- `gen` is main's file generation; it guards main's own callback. Supersession
+-- WITHIN a load needs its own counter — see prepare_seq above.
+function M.casthead_prepare(cast, gen, cb)
+    -- Skip an identical re-request for the same load: main fires fire_casthead
+    -- twice, so a stale cached card asks for the same faces twice. Returning
+    -- without a cb is correct — the live prepare still owns casthead_active and
+    -- its own cb will show the strip or clear it. A different profile set (a
+    -- fresh TMDB cast) still supersedes, and a failed attempt may retry.
+    local sig = {}
+    for _, e in ipairs(cast or {}) do
+        if type(e) == "table" and e.profile and e.profile ~= "" then sig[#sig + 1] = e.profile end
+    end
+    sig = table.concat(sig, "|")
+    if sig ~= "" and gen == last_prep.gen and sig == last_prep.sig
+        and (last_prep.state == "inflight" or last_prep.state == "ok") then
+        return
+    end
+    last_prep.gen, last_prep.sig, last_prep.state = gen, sig, "inflight"
+    prepare_seq = prepare_seq + 1
+    local token = prepare_seq
+    -- Record the outcome so a retry is allowed after a genuine failure; a
+    -- superseded prepare must not stomp the newer one's state.
+    local real_cb = cb
+    cb = function(n)
+        if casthead.token == token then last_prep.state = (n > 0) and "ok" or "fail" end
+        return real_cb(n)
+    end
     casthead.token = token
     casthead.heads = {}
     casthead.labels = nil
