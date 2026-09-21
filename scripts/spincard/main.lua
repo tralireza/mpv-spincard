@@ -116,6 +116,18 @@ local opts = {
 }
 options.read_options(opts, "spincard")
 
+-- mpv's conf format takes '#' as a comment only at column 1, so "key=val # note"
+-- leaves the note IN the value. Numbers/bools then fail loudly (mpv logs and keeps
+-- the default); strings are never converted, so they break silently. Warn, don't
+-- strip — a legitimate value may contain " #".
+for k, v in pairs(opts) do
+    if type(v) == "string" and v:find("%s#") then
+        msg.warn(string.format("option '%s' looks like it has a trailing comment: %q"
+            .. " — mpv only honours '#' at the start of a line, so the comment is part"
+            .. " of the value. Move it to its own line.", k, v))
+    end
+end
+
 -- Wire the split-out modules to the runtime options, then bind the functions this
 -- file still calls to plain locals so every existing call site stays unchanged.
 cache.init(opts); tmdb.init(opts); omdb.init(opts); tvheadend.init(opts)
@@ -477,6 +489,11 @@ local function on_file_loaded()
     local disc_path = opts.show_disc and images.find_disc(path, id) or nil
     local fanart_path = opts.show_fanart and images.find_fanart(path, id) or nil
     local banner_path = opts.show_banner and images.find_banner(path, id) or nil
+    -- Without this, "no images at all" and "decode failed" look identical in a log.
+    -- Upvalue-safe: msg is already one, the rest are locals of this function.
+    msg.verbose(string.format("artwork for '%s': poster=%s fanart=%s banner=%s logo=%s disc=%s",
+        tostring(path), tostring(poster_path), tostring(fanart_path),
+        tostring(banner_path), tostring(logo_path), tostring(disc_path)))
 
     -- Confidence promotion: identify() returns kind="unknown" when the path
     -- carries no content-type signal (no Movies/Films or TV folder, no SxxEyy).

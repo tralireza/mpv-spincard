@@ -4,6 +4,7 @@
 -- rating_stale needs opts.rating_ttl, so call cache.init(opts) once at startup.
 
 local utils = require "mp.utils"
+local util  = require "util" -- home() / mkdir_p(): Windows has no HOME and no `mkdir -p`
 
 local M = {}
 
@@ -12,11 +13,11 @@ function M.init(o) opts = o end
 
 -- Disk cache ----------------------------------------------------------------
 
-local CACHE_DIR = (os.getenv("HOME") or "/tmp") .. "/.cache/spincard"
-os.execute("mkdir -p '" .. CACHE_DIR .. "' 2>/dev/null")
+local CACHE_DIR = util.path(util.home(), ".cache", "spincard")
+util.mkdir_p(CACHE_DIR)
 
 local function cache_path(key)
-    return CACHE_DIR .. "/" .. (tostring(key):gsub("[^%w%-_]", "_")) .. ".json"
+    return util.path(CACHE_DIR, (tostring(key):gsub("[^%w%-_]", "_")) .. ".json")
 end
 
 local function cache_get(key)

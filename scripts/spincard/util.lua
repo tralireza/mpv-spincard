@@ -451,4 +451,72 @@ function M.ellipsize_px(text, maxw, fs, marker, bold)
     return (table.concat(line):gsub("[%s._/,%-]+$", "")) .. marker -- trim trailing seps
 end
 
+-- Paths / platform ----------------------------------------------------------
+-- mpv reports `path` verbatim, so a Windows library yields backslashes; every
+-- split here must tolerate both separators.
+
+local WIN = package.config:sub(1, 1) == "\\" -- its first char IS the separator
+M.WIN = WIN
+local SEP = WIN and "\\" or "/"
+M.SEP = SEP
+
+-- Join with the native separator. For paths we CONSTRUCT (caches, BGRA scratch);
+-- use M.join for one derived from mpv's `path`.
+function M.path(...)
+    return (table.concat({ ... }, SEP))
+end
+
+-- (dir, basename-without-extension).
+function M.split_path(p)
+    p = p or ""
+    local dir, file = p:match("^(.*)[/\\]([^/\\]+)$")
+    if not dir then return ".", (p:gsub("%.%a%w?%w?%w?$", "")) end
+    if dir == "" then dir = "/" end -- "/movie.mkv" is at the root, not in ""
+    return dir, (file:gsub("%.%a%w?%w?%w?$", ""))
+end
+
+-- Parent of `dir` — the show root, given a "Season 01" folder.
+function M.parent_dir(dir)
+    if not dir then return nil end
+    local up = dir:match("^(.*)[/\\][^/\\]+$")
+    if up == "" then return "/" end
+    return up
+end
+
+-- Extend a DISCOVERED dir, keeping its own separator style — mpv returns whatever
+-- the user opened, and a Windows path may legally use "/" (Z:/Movies/…). Forcing
+-- SEP would yield "Z:/Movies\poster.jpg".
+function M.join(dir, name)
+    if dir:match("\\[^/\\]*$") then return dir .. "\\" .. name end
+    if dir:match("/[^/\\]*$") then return dir .. "/" .. name end
+    return dir .. SEP .. name
+end
+
+-- live TV (http://), bd://, dvd://… — nothing for artwork discovery to list.
+-- A drive letter ("D:/…") has no "//" after the colon, so it is not a URL.
+function M.is_url(p)
+    return p ~= nil and p:match("^%a%a+://") ~= nil
+end
+
+-- Windows exports no HOME.
+function M.home()
+    return os.getenv("HOME") or os.getenv("USERPROFILE") or "/tmp"
+end
+
+-- Windows exports TEMP/TMP, not TMPDIR, and has no /tmp; macOS TMPDIR ends in "/".
+function M.tmpdir()
+    local d = os.getenv("TMPDIR") or os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
+    return (d:gsub("[/\\]+$", ""))
+end
+
+-- mpv's Lua API has no mkdir, so this shells out. cmd's mkdir has no -p but
+-- creates intermediates when command extensions are on (the default).
+function M.mkdir_p(dir)
+    if WIN then
+        os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
+    else
+        os.execute("mkdir -p '" .. dir .. "' 2>/dev/null")
+    end
+end
+
 return M

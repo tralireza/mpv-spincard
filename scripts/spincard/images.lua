@@ -9,15 +9,18 @@
 -- their own locals unchanged):
 --   deps.logo_rect() / deps.card_rect() — the 1280x720 rects build_card computes
 --   deps.visible()                      — whether the card is currently shown
--- file_exists comes from the sidecar module (fs discovery).
+-- Artwork DISCOVERY lives in sidecar, so every layer shares one directory
+-- listing and one set of naming rules.
 
 local mp    = require "mp"
 local msg   = require "mp.msg"
 local utils = require "mp.utils"
-local file_exists = require("sidecar").file_exists
+local sidecar = require("sidecar") -- find_art_near / find_in_dir / IMG_EXTS / ALPHA_EXTS
 local layout = require("layout")
-local util  = require("util") -- ellipsize_px / ass_escape for the cast-headshot name labels
+local util  = require("util") -- ellipsize_px / ass_escape for the cast labels; split_path / tmpdir
 local fanart = require("fanart") -- fanart.tv disc/banner lookup (init'd in M.init below)
+
+local TMPDIR = util.tmpdir() -- scratch dir for the per-session BGRA bitmaps
 
 local M = {}
 local RES_X, RES_Y = layout.RES_X, layout.RES_Y -- virtual card space (matches main's overlay res)
@@ -38,10 +41,10 @@ M.fanart_fetch = fanart.fetch_art
 -- decode still runs, same as local art.) Download to a pid-tagged .part temp then
 -- rename, so an interrupted/concurrent transfer never leaves a corrupt cache entry.
 local TMDB_IMG = "https://image.tmdb.org/t/p/"
-local IMG_CACHE = (os.getenv("HOME") or "/tmp") .. "/.cache/spincard/img"
-os.execute("mkdir -p '" .. IMG_CACHE .. "' 2>/dev/null")
+local IMG_CACHE = util.path(util.home(), ".cache", "spincard", "img")
+util.mkdir_p(IMG_CACHE)
 local function img_cache_path(size, path)
-    return IMG_CACHE .. "/" .. size .. "_" .. (path:gsub("[^%w%-_.]", "_"))
+    return util.path(IMG_CACHE, size .. "_" .. (path:gsub("[^%w%-_.]", "_")))
 end
 function M.fetch_image(path, size, _tag, cb)
     if not path or path == "" then return cb(nil) end
@@ -89,8 +92,8 @@ end
 
 local poster = {
     id = 1,
-    file = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-poster-"
-        .. (mp.get_property("pid") or "x") .. ".bgra",
+    file = util.path(TMPDIR, "spincard-poster-"
+        .. (mp.get_property("pid") or "x") .. ".bgra"),
     w = 0, h = 0, face_w = 0, face_h = 0, ready = false, shown = false, src = nil,
 }
 M.poster = poster
@@ -176,36 +179,24 @@ function M.poster_show()
 end
 
 -- Fanart backdrop: decode a dimmed local jpg -> BGRA, draw full-frame ---------
--- Kodi/Emby naming: fanart.jpg, <name>-fanart.jpg, backdrop.jpg (+ show-level).
+-- Kodi/Emby naming: <file>-fanart, fanart, backdrop (+ show-level).
 -- Note: mpv draws image overlays above ASS text, so this tints the card too;
 -- fanart.id is lower than poster.id so the poster stays on top.
 
 local fanart = {
     id = 0,
-    file = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-fanart-"
-        .. (mp.get_property("pid") or "x") .. ".bgra",
+    file = util.path(TMPDIR, "spincard-fanart-"
+        .. (mp.get_property("pid") or "x") .. ".bgra"),
     w = 0, h = 0, ready = false, shown = false, src = nil,
 }
 M.fanart = fanart
 local FANART_H = 720 -- decode height for the dimmed backdrop
 
 function M.find_fanart(path, id)
-    local dir = path:match("^(.*)/[^/]+$") or "."
-    local base = (path:match("([^/]+)$") or path):gsub("%.%a%w?%w?%w?$", "")
-    local cands = {
-        dir .. "/" .. base .. "-fanart.jpg",
-        dir .. "/fanart.jpg",
-        dir .. "/backdrop.jpg",
-    }
-    if id.kind == "tv" then
-        local showdir = dir:match("^(.*)/[^/]+$") -- parent of Season.N
-        if showdir then
-            cands[#cands + 1] = showdir .. "/fanart.jpg"
-            cands[#cands + 1] = showdir .. "/backdrop.jpg"
-        end
-    end
-    for _, c in ipairs(cands) do if file_exists(c) then return c end end
-    return nil
+    local _, base = util.split_path(path)
+    return sidecar.find_art_near(path, id,
+        { base .. "-fanart", base .. "-backdrop" },
+        { "fanart", "backdrop" }, sidecar.IMG_EXTS)
 end
 
 -- Decode the fanart to one premultiplied-BGRA dimmed frame: RGB + alpha scaled by
@@ -260,8 +251,8 @@ end
 
 local banner = {
     id = 3,
-    file = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-banner-"
-        .. (mp.get_property("pid") or "x") .. ".bgra",
+    file = util.path(TMPDIR, "spincard-banner-"
+        .. (mp.get_property("pid") or "x") .. ".bgra"),
     w = 0, h = 0, face_w = 0, face_h = 0, ready = false, shown = false, src = nil,
 }
 M.banner = banner
@@ -273,14 +264,9 @@ local BANNER_SIG = 5                                        -- shadow blur sigma
 local BANNER_PAD = BANNER_SHO + 3 * BANNER_SIG             -- right/bottom room so the blur isn't clipped (~19)
 
 function M.find_banner(path, id)
-    local dir = path:match("^(.*)/[^/]+$") or "."
-    local cands = { dir .. "/banner.jpg" }
-    if id.kind == "tv" then
-        local showdir = dir:match("^(.*)/[^/]+$") -- parent of Season.N
-        if showdir then cands[#cands + 1] = showdir .. "/banner.jpg" end
-    end
-    for _, c in ipairs(cands) do if file_exists(c) then return c end end
-    return nil
+    local _, base = util.split_path(path)
+    return sidecar.find_art_near(path, id,
+        { base .. "-banner" }, { "banner" }, sidecar.IMG_EXTS)
 end
 
 function M.banner_decode(srcpath, cb)
@@ -348,8 +334,8 @@ end
 
 local clearlogo = {
     id = 4,
-    file = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-logo-"
-        .. (mp.get_property("pid") or "x") .. ".bgra",
+    file = util.path(TMPDIR, "spincard-logo-"
+        .. (mp.get_property("pid") or "x") .. ".bgra"),
     w = 0, h = 0, ready = false, shown = false, src = nil,
 }
 M.clearlogo = clearlogo
@@ -359,8 +345,8 @@ M.LOGO_GAP = LOGO_GAP   -- build_card reads this to place the first text row bel
 
 local disc = {
     id = 5,
-    file = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-disc-"
-        .. (mp.get_property("pid") or "x") .. ".bgra",
+    file = util.path(TMPDIR, "spincard-disc-"
+        .. (mp.get_property("pid") or "x") .. ".bgra"),
     w = 0, h = 0, ready = false, shown = false, src = nil,
     frames = 1, framebytes = 0, spin_idx = 0, spin_timer = nil,
 }
@@ -389,26 +375,26 @@ local function png_decode(img, srcpath, height, cb, extra_vf, pre_vf)
         img.h = height
         img.w = math.floor(fi.size / (4 * height))
         img.ready, img.src = true, srcpath
-        msg.verbose(string.format("%s %dx%d ready", srcpath:match("([^/]+)$"), img.w, img.h))
+        msg.verbose(string.format("%s %dx%d ready", srcpath:match("([^/\\]+)$"), img.w, img.h))
         cb(true)
     end)
 end
 
-local function find_art(path, id, name)
-    local dir = path:match("^(.*)/[^/]+$") or "."
-    local cands = { dir .. "/" .. name }
-    if id.kind == "tv" then
-        local showdir = dir:match("^(.*)/[^/]+$")
-        if showdir then cands[#cands + 1] = showdir .. "/" .. name end
-    end
-    for _, c in ipairs(cands) do if file_exists(c) then return c end end
-    return nil
+-- ALPHA_EXTS (png-only) for both of these — see sidecar.
+function M.find_clearlogo(path, id)
+    local _, base = util.split_path(path)
+    return sidecar.find_art_near(path, id,
+        { base .. "-clearlogo", base .. "-logo" },
+        { "clearlogo", "logo" }, sidecar.ALPHA_EXTS)
 end
 
-function M.find_clearlogo(path, id)
-    return find_art(path, id, "clearlogo.png") or find_art(path, id, "logo.png")
+-- "discart" is Kodi's original name for disc art, "disc" the newer alias.
+function M.find_disc(path, id)
+    local _, base = util.split_path(path)
+    return sidecar.find_art_near(path, id,
+        { base .. "-disc", base .. "-discart" },
+        { "disc", "discart" }, sidecar.ALPHA_EXTS)
 end
-function M.find_disc(path, id) return find_art(path, id, "disc.png") end
 
 -- Decode the clearlogo cropped to its opaque bounding box, so the reserved title
 -- slot maps to real artwork rather than the PNG's (variable) transparent margins.
@@ -547,12 +533,12 @@ end
 -- card's bottom-anchor shift never moves them). Static: draws only the faces that
 -- fit one row. TMDB-only (profiles come from credits[].profile_path).
 local casthead = {
-    base = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-cast-" .. (mp.get_property("pid") or "x"),
+    base = util.path(TMPDIR, "spincard-cast-" .. (mp.get_property("pid") or "x")),
     ids = { 6, 7, 8, 9, 10, 11 }, -- free overlay-id block (static: one per head; scroll: 6=window, 7=wrap seam)
     heads = {},   -- static style: [i] = { file, w, h, ready, src, name }
     names_ov = nil,
     packed = {    -- scroll style: ALL faces hstacked into ONE wide premultiplied BGRA
-        file = (os.getenv("TMPDIR") or "/tmp") .. "/spincard-castrow-" .. (mp.get_property("pid") or "x") .. ".bgra",
+        file = util.path(TMPDIR, "spincard-castrow-" .. (mp.get_property("pid") or "x") .. ".bgra"),
         w = 0, h = 0, face_h = 0, ready = false, -- h includes the baked shadow band; face_h is the face row
     },
     scroll_idx = 0, scroll_timer = nil, wrap_shown = false, -- marquee offset, timer, seam-overlay state

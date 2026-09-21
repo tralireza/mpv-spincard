@@ -150,35 +150,76 @@ Restart mpv and play something with artwork/`.nfo` beside it.
 
 ## Configuration
 
-All options live in `script-opts/spincard.conf`:
+All options live in `script-opts/spincard.conf`, which ships with every option
+documented. The highlights, in valid conf syntax:
+
+> **Format:** one option per line, comments on their **own** line. mpv keeps
+> everything after the first `=` as the value, so `pos_x=22  pos_y=22` sets
+> `pos_x` to `"22  pos_y=22"` and never sets `pos_y`, and a trailing `# note`
+> becomes part of the value.
 
 ```
-auto_show=yes          # show the card when a file opens
-duration=7             # auto-show timeout in seconds (0 = until toggled)
-toggle_timeout=17      # toggle-key auto-close (0 = until toggled)
-show_on_pause=no       # pop the card while paused, hide on resume
-lean_hide=overview     # blocks the LEAN card (C) omits: overview, tagline, cast, tech,
-                       #   genres, awards, rating, meta
+# Show the card when a file opens, then auto-close (0 = until toggled off).
+auto_show=yes
+duration=7
+toggle_timeout=17
+# Pop the card while paused, hide on resume.
+show_on_pause=no
+# Blocks the LEAN card (C) omits: overview, tagline, cast, tech, genres,
+# awards, rating, meta.
+lean_hide=overview
 
-anchor=bottom          # "bottom" (hug bottom, grow up) or "top"
-pos_x=22  pos_y=22     # margin in a 1280x720 virtual space (~3%, matches the banner inset)
+# "bottom" (hug bottom, grow up) or "top"; margins in a 1280x720 virtual
+# space (~3%, matching the banner inset).
+anchor=bottom
+pos_x=22
+pos_y=22
 
-show_poster=yes   poster_height=0.42   poster_margin=0.02
-show_fanart=yes   fanart_opacity=0.25   fanart_pause_only=yes   # dimmed backdrop, shown while paused
-show_logo=yes     logo_height=0.12
-remote_art=yes    # fetch poster/fanart/clearlogo from TMDB when there's no local file (cached to disk)
-show_disc=yes     disc_size=0.22
-disc_spin=yes     disc_spin_secs=5   disc_spin_frames=96
-show_banner=yes   banner_height=0.10   # wide banner.jpg top-left (if present)
-fanart_tv_api_key=                       # fanart.tv key: fetch movie disc + banner when no local file (movie-only)
-show_tech=yes     # codec/HDR/audio/subs/chapters + live progress
-overview_scroll=yes  overview_lines=4  overview_scroll_mode=smooth   # synopsis: smooth glide (or "line")
-cast_headshots=no  casthead_style=scroll  casthead_max=10  casthead_pause_only=yes   # cast photo strip; shown while paused (scroll | static)
+show_poster=yes
+poster_height=0.42
+poster_margin=0.02
+# Dimmed backdrop, shown while paused.
+show_fanart=yes
+fanart_opacity=0.25
+fanart_pause_only=yes
+show_logo=yes
+logo_height=0.12
+# Fetch poster/fanart/clearlogo from TMDB when there's no local file (cached).
+remote_art=yes
+show_disc=yes
+disc_size=0.22
+disc_spin=yes
+disc_spin_secs=5
+disc_spin_frames=96
+# Wide banner.jpg top-left, if present.
+show_banner=yes
+banner_height=0.10
+# fanart.tv key: fetches the movie disc + banner when no local file (movie-only).
+fanart_tv_api_key=
 
-enrich=yes   api_key=   omdb_api_key=   language=en-US   # TMDB + OMDb (optional; empty = local only)
-rating_ttl=3600                          # refresh IMDb/TMDB ratings when older than this (s); 0 = off
-tvheadend_url=                           # live-TV EPG (e.g. http://127.0.0.1:9981)
-live_upcoming=7                          # live TV: "Next" programmes to list (0 = none)
+# Codec/HDR/audio/subs/chapters + live progress.
+show_tech=yes
+# Synopsis marquee: "smooth" glide or "line" jump.
+overview_scroll=yes
+overview_lines=4
+overview_scroll_mode=smooth
+# Cast photo strip, shown while paused ("scroll" | "static").
+cast_headshots=no
+casthead_style=scroll
+casthead_max=10
+casthead_pause_only=yes
+
+# TMDB + OMDb (optional; empty = local metadata only).
+enrich=yes
+api_key=
+omdb_api_key=
+language=en-US
+# Refresh IMDb/TMDB ratings when older than this, in seconds (0 = off).
+rating_ttl=3600
+# Live-TV EPG, e.g. http://127.0.0.1:9981
+tvheadend_url=
+# Live TV: how many "Next" programmes to list (0 = none).
+live_upcoming=7
 ```
 
 ## Library layout (Kodi / Emby)
