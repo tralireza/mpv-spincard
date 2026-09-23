@@ -127,8 +127,7 @@ cp -r scripts/spincard          ~/.config/mpv/scripts/
 cp    script-opts/spincard.conf ~/.config/mpv/script-opts/
 ```
 
-Bind the toggle keys in `~/.config/mpv/input.conf` — use **plain** keys (over
-tmux/SSH, `Ctrl+<letter>` collides with Tab/Enter/Esc):
+Bind the toggle keys in `~/.config/mpv/input.conf`:
 
 ```
 c script-binding spincard/toggle

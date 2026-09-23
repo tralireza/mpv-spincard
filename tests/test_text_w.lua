@@ -3,15 +3,14 @@
 -- estimator against its own output; this one pins it to a REAL libass render.
 --   run:  luajit tests/test_text_w.lua   (from the repo root)
 --
--- PROVENANCE of the expected widths below (local/calib-raw.json, not tracked):
---   host   i7, mpv v0.41.0-920-gdd5d17d32, window 1600x900 (PlayRes 1280x720)
---   font   osd-font unset -> "sans-serif" -> fc-match
---          /usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf (DejaVu Sans Book);
---          bold -> DejaVuSans-Bold.ttf
+-- PROVENANCE of the expected widths below:
+--   host   Linux, mpv 0.41, window 1600x900 (PlayRes 1280x720)
+--   font   osd-font unset -> "sans-serif" -> fc-match -> DejaVuSans.ttf
+--          (DejaVu Sans Book); bold -> DejaVuSans-Bold.ttf
 --   method `osd-overlay ... compute_bounds=true` (hidden=true) on the real OSD,
 --          \bord0\shad0 ink width, cross-checked against the font file's advances
 --   `reg`  = ink width rendered REGULAR, `bold` = the same string rendered \b1
--- Re-measure (and re-gold) if osd_font is ever set or the target box's
+-- Re-measure (and re-gold) if osd_font is ever set or the system's
 -- sans-serif resolves to another family — the tables are DejaVu-specific.
 --
 -- Two bands are asserted per case:

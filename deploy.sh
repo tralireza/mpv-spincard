@@ -33,8 +33,7 @@ cat <<EOF
 
 Done. Next:
   - Restart mpv on $HOST (scripts load at startup), then play a file.
-  - Optional toggle keys — add to ~/.mpv/input.conf on $HOST. Use PLAIN keys:
-    over tmux/SSH, Ctrl+<letter> collides with Tab/Enter/Esc. Avoid i/I (mpv stats).
+  - Optional toggle keys — add to ~/.mpv/input.conf on $HOST. Avoid i/I (mpv stats).
         c script-binding spincard/toggle
         C script-binding spincard/toggle-lean    # lean card (see lean_hide)
 EOF

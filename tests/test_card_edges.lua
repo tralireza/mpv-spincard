@@ -128,7 +128,7 @@ local function event_right(ev)
 end
 
 -- 1 --------------------------------------------------------------- the bug ----
--- the exact failing title, measured off a 1920x1080 i7 capture
+-- the exact failing title, measured off a 1920x1080 capture
 local BAD = "01.Isle.of.Man.TT.2026x03.RST.Superbike.TT.mp4"
 local uass = card.build_card({ kind = "unknown", title = BAD })
 local hw, hfs, htxt

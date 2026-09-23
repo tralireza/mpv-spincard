@@ -464,7 +464,7 @@ local DISC_MASK = "geq=r=r(X\\,Y):g=g(X\\,Y):b=b(X\\,Y):a=if(lt(X\\,W/2)*gt(Y\\,
 function M.disc_decode(srcpath, cb)
     -- A pause-only disc never spins (only frame 0 is ever drawn), so decode a SINGLE static
     -- frame like disc_spin=false — skips the heavy rotate+mask pass and the ~n×256²×4 packed
-    -- temp (pure waste on the weak box this opt exists for).
+    -- temp (pure waste on the low-power boxes this opt exists for).
     local spin = opts.disc_spin and not opts.disc_pause_only
     local args
     if spin then

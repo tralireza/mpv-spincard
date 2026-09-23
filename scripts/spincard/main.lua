@@ -1,11 +1,11 @@
 -- spincard — identify the playing file from its full path and show a
 -- metadata card. Identity comes from identify.lua; enrichment from TMDB (via a
--- curl subprocess, per Docs/MpvLuaMetadataApiProvider.md), cached on disk.
+-- curl subprocess), cached on disk.
 --
 -- Degrades gracefully: with no API key or no network it shows a card built from
 -- the parsed filename + mpv's own local properties.
 --
--- Target: mpv on i7 (Linux). Config in ~/.mpv (see README).
+-- Config: ~~/script-opts/spincard.conf, i.e. under mpv's config dir (see README).
 
 local mp      = require "mp"
 local msg     = require "mp.msg"
@@ -33,15 +33,12 @@ local layout    = require("layout")
 local tech      = require("tech")
 local card      = require("card")
 
--- Options (override in ~/.mpv/script-opts/spincard.conf) -------------
+-- Options (override in ~~/script-opts/spincard.conf) -----------------
 local opts = {
     auto_show = true,      -- show the card automatically when a file loads
     show_on_pause = false, -- pop the card while paused, hide on resume (opt-in)
     duration  = 7,         -- auto-show-on-open timeout (0 = stay until toggled)
     toggle_timeout = 17,   -- toggle-key auto-close timeout (0 = stay until toggled)
-    key       = "",        -- default toggle key ("" = bind via input.conf)
-    lean_key  = "",        -- LEAN-card key ("" = bind via input.conf, e.g.
-                           --   C script-binding spincard/toggle-lean)
     lean_hide = "overview", -- LEAN card: blocks to omit — overview, tagline, cast, tech,
                             -- genres, awards, rating, meta (comma/space list)
     pos_x     = 22,     -- left margin (virtual px) — ~3% on 16:9, matches the banner inset
@@ -85,7 +82,7 @@ local opts = {
     disc_spin      = true,  -- spin the disc while the card is showing
     disc_spin_secs = 5,     -- seconds per full rotation (higher = slower; 5 just reads nicer)
     disc_spin_frames = 96,  -- rotation frames (more = smoother; larger temp file)
-    disc_pause_only = false, -- yes = show the disc ONLY while paused (hidden during playback, when it spins = the CPU cost on a weak GPU); shown frozen on pause. Set on i7. no = disc shows + spins during playback (default)
+    disc_pause_only = false, -- yes = show the disc ONLY while paused (hidden during playback, when it spins = the CPU cost on a weak GPU); shown frozen on pause. Saves power on a low-power box. no = disc shows + spins during playback (default)
     cast_max      = 5,      -- max cast entries shown/cycled (also the scroll pool size)
     cast_scroll   = true,   -- scroll the cast (else pack ≤2 rows); style set by cast_scroll_dir
     cast_scroll_dir = "horizontal", -- "horizontal" (1-line glide ticker) | "vertical" (2×2 grid)
@@ -311,7 +308,7 @@ local function lean_omits(name) return lean and card.lean_hidden(name) end
 -- already kill-before-create + reset-index (show() is re-entered without hide() on channel
 -- change), so they're safe to run again from the in-place FULL<->LEAN switch. A block the
 -- LEAN card omits gets NO timer: the synopsis ticker rebuilds the WHOLE card at 10 Hz, and
--- doing that for a section that isn't drawn is pure CPU burn on the weak target box.
+-- doing that for a section that isn't drawn is pure CPU burn on a low-power box.
 local function sync_marquees()
     -- cast marquee: advance the idx on its own cadence (build_card reads the idx).
     -- Horizontal glide steps fast (cast_scroll_interval); vertical grid steps a row
@@ -420,7 +417,7 @@ show = function(timeout)
 end
 
 -- One state machine behind BOTH keys (toggle = FULL card, toggle-lean = LEAN card):
---            |  toggle (c)              |  toggle-lean (C)
+--            |  toggle                  |  toggle-lean
 --   hidden   |  show FULL               |  show LEAN
 --   FULL up  |  hide                    |  switch to LEAN, in place
 --   LEAN up  |  switch to FULL, in place|  hide
@@ -973,12 +970,11 @@ mp.observe_property("pause", "bool", function(_, paused)
     end
 end)
 
-local bind_key = (opts.key ~= "") and opts.key or nil
-mp.add_key_binding(bind_key, "toggle", toggle)
--- Second key: the LEAN card. Binding NAMES may contain '-' (the literal-underscore rule
--- applies to --script-opts KEYS, a different namespace) => script-binding spincard/toggle-lean
-local lean_bind_key = (opts.lean_key ~= "") and opts.lean_key or nil
-mp.add_key_binding(lean_bind_key, "toggle-lean", toggle_lean)
+-- No default keys: bind by name in input.conf (see README).
+-- Binding NAMES may contain '-' (the literal-underscore rule
+-- applies to --script-opts KEYS, a different namespace).
+mp.add_key_binding(nil, "toggle", toggle)
+mp.add_key_binding(nil, "toggle-lean", toggle_lean)
 
 -- The VO/OSD often isn't ready when a poster finishes decoding at playback
 -- start, so overlay-add would use a zero size and skip. Re-show once the OSD

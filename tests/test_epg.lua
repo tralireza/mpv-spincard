@@ -4,7 +4,7 @@
 -- Part 1 — tvheadend.tvh_fetch: given a Tvheadend EPG grid (ordered by start,
 --   forward-filtered) it must pick the programme that COVERS now (start<=now<stop),
 --   not blindly entries[1]; on a guide gap it must return a `no_epg` card (channel +
---   upcoming only). Grids use the REAL timestamps captured from the i7 server.
+--   upcoming only). Grids use REAL timestamps captured from a live Tvheadend server.
 -- Part 2 — card.build_card: a `no_epg` livetv card renders the channel as the
 --   heading + "No programme information" (and still lists upcoming), never a
 --   stale/future programme dressed up as "now".

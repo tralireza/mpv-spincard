@@ -27,8 +27,8 @@ local opts, deps = {}, {}
 function M.init(o, d) opts, deps = o, d end
 
 -- Display fraction 0..1 for the bar fill (rough ranges — lit count only). Signal
--- dBm fills a 50 dB window whose top is the tuner's configured max (signal_dbm_max,
--- default the observed DS3000 ceiling); % maps directly; SNR dB ~ 0..20.
+-- dBm fills a 50 dB window whose top is the tuner's configured max (signal_dbm_max);
+-- % maps directly; SNR dB ~ 0..20.
 local function metric_frac(v, unit)
     local f
     if unit == "%" then f = v / 100
@@ -118,7 +118,7 @@ function M.build_card(c)
     -- that was measured against libass, NOT a proof. Glyphs with no measured entry ride
     -- util.lua's block-aware fallbacks, which deliberately over-predict (+0..13%), and
     -- kerning-heavy runs (To, Wa, AV) over-predict too — both are the safe direction.
-    -- The tables are DejaVu Sans, i7's fc-match for mpv's default sans; another box with
+    -- The tables are DejaVu Sans, fc-match's pick for mpv's default sans; a box with
     -- a different sans is unverified (still far better than the old guessed weights).
     -- Shared by heading(), the sub line, the overview, the cast/tech fits and the
     -- meta-line budgets — one space throughout.

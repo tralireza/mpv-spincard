@@ -160,7 +160,7 @@ end
 
 -- Mux (transponder) parameters, fetched once and memoised: name -> {delsys,
 -- freq (kHz), symrate (sym/s), mod, fec, pol}. The mux name equals the first
--- token of an input's `stream` field (e.g. "11641H in Astra 28.2E" -> "11641H").
+-- token of an input's `stream` field (e.g. "11000H in <network>" -> "11000H").
 local tvh_muxes = nil
 local function tvh_get_muxes(cb)
     if tvh_muxes then return cb(tvh_muxes) end

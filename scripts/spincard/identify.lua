@@ -89,7 +89,7 @@ function M.identify(path)
     local parent = path:match("([^/\\]+)[/\\][^/\\]+$")
     local s = strip_ext(fname):gsub("[%._]", " "):lower()
 
-    -- Library path hints (e.g. /zhd/Movies vs /zhd/TV). A folder that names the
+    -- Library path hints (e.g. .../Movies/... vs .../TV/...). A folder that names the
     -- content type is a confident signal all on its own.
     local lpath = path:lower()
     local is_movie_path = lpath:find("/movies?/") ~= nil or lpath:find("/films?/") ~= nil

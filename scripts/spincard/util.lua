@@ -219,7 +219,7 @@ end
 -- Approx rendered width (virtual px) of a UTF-8 string at font size `fs`. libass
 -- exposes no text-measure API, so we sum per-glyph ADVANCES from a measured table.
 -- The weights are the real DejaVu Sans (mpv's default OSD sans) advances in em,
--- captured on the target box with `osd-overlay ... compute_bounds=true` at
+-- captured from a real libass render with `osd-overlay ... compute_bounds=true` at
 -- PlayRes 1280x720 and cross-checked against the font file (see tests/test_text_w.lua
 -- for the captured ground truth). Accurate to ~2% on a whole string, so — unlike
 -- the old guessed table — this is NOT a ~1.22x over-estimate and callers must not
